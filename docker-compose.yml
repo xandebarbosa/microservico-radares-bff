@@ -1,0 +1,24 @@
+networks:
+  # Declara que vamos usar a rede externa que já foi criada
+  radares-net:
+    external: true
+
+services:
+  # Define o serviço para a aplicação BFF
+  microservico-radares-bff:
+    container_name: microservico-radares-bff
+    # Constrói a imagem a partir do Dockerfile que está nesta mesma pasta
+    build:
+      context: .
+    ports:
+      # Expõe a porta 8080 do BFF para a sua máquina local
+      - "8080:8080"
+    environment:
+      # Ativa o perfil de produção para usar o application-prod.properties
+      - SPRING_PROFILES_ACTIVE=prod
+      # Se você tiver segredos no .env da infraestrutura, passe-os aqui
+      # - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    networks:
+      # Conecta este contêiner à nossa rede compartilhada
+      - radares-net
+    restart: unless-stopped

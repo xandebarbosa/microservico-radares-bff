@@ -130,4 +130,18 @@ public class RealtimeUpdateService {
     public Map<String, RadarDTO> getLatestRadars() {
         return lastRadarByConcessionaria;
     }
+
+    // =============================================================
+    // ##         NOVO LISTENER PARA ALERTAS CONFIRMADOS            ##
+    // =============================================================
+    /**
+     * Ouve a fila de alertas que já foram validados pelo serviço de monitoramento
+     * e os retransmite para um tópico WebSocket exclusivo da tela de monitoramento.
+     */
+    @RabbitListener(queues = "alertas_confirmados_queue")
+    public void receiveConfirmedAlert(String alertaJson) {
+        logger.info("Alerta confirmado recebido do RabbitMQ: {}", alertaJson);
+        // Retransmite para um NOVO tópico do WebSocket
+        messagingTemplate.convertAndSend("/topic/confirmed-alerts", alertaJson);
+    }
 }

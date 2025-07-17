@@ -1,5 +1,7 @@
 package com.coruja.services;
 
+import com.coruja.dto.AlertaPassagemDTO;
+import com.coruja.dto.PageAlertaPassagemDTO;
 import com.coruja.dto.PagePlacaMonitoradaDTO;
 import com.coruja.dto.PlacaMonitoradaDTO;
 import lombok.RequiredArgsConstructor;
@@ -10,6 +12,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Mono;
 
 @Service
@@ -64,6 +67,32 @@ public class MonitoramentoBFFService {
     public Mono<Void> deletarMonitorado(Long id) {
         String url = String.format("%s/api/monitoramento/%d", monitoramentoUrl, id);
         return webClient.delete().uri(url).retrieve().bodyToMono(Void.class);
+    }
+
+    /**
+     * NOVO: Busca o histórico de alertas de forma paginada no serviço de monitoramento.
+     */
+    public Mono<Page<AlertaPassagemDTO>> listarAlertas(Pageable pageable) {
+
+        // Constrói a URL de forma segura e programática
+        UriComponentsBuilder builder = UriComponentsBuilder
+                .fromHttpUrl(monitoramentoUrl + "/api/monitoramento/alertas")
+                .queryParam("page", pageable.getPageNumber())
+                .queryParam("size", pageable.getPageSize());
+
+        // Adiciona os parâmetros de sort se eles existirem
+        pageable.getSort().forEach(order -> {
+            builder.queryParam("sort", order.getProperty() + "," + order.getDirection().name());
+        });
+
+        String url = builder.toUriString();
+        log.info("BFF chamando serviço de monitoramento para buscar histórico de alertas: {}", url);
+
+        return webClient.get()
+                .uri(url)
+                .retrieve()
+                .bodyToMono(PageAlertaPassagemDTO.class) // Usa o DTO de página
+                .map(pageDto -> (Page<AlertaPassagemDTO>) pageDto); // Converte para a interface Page
     }
 
 }

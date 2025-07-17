@@ -1,5 +1,6 @@
 package com.coruja.controller;
 
+import com.coruja.dto.AlertaPassagemDTO;
 import com.coruja.dto.PlacaMonitoradaDTO;
 import com.coruja.services.MonitoramentoBFFService;
 import lombok.RequiredArgsConstructor;
@@ -45,5 +46,14 @@ public class MonitoramentoBFFController {
     public Mono<ResponseEntity<Void>> deletar(@PathVariable Long id) {
         return service.deletarMonitorado(id)
                 .thenReturn(ResponseEntity.noContent().build());
+    }
+
+    /**
+     * NOVO: Endpoint para listar o histórico de passagens que geraram alerta.
+     */
+    @GetMapping("/alertas")
+    public Mono<ResponseEntity<Page<AlertaPassagemDTO>>> listarAlertas(Pageable pageable) {
+        return service.listarAlertas(pageable)
+                .map(ResponseEntity::ok);
     }
 }

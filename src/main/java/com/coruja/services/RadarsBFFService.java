@@ -30,14 +30,14 @@ public class RadarsBFFService {
     private final Map<String, String> serviceUrlMap = new HashMap<>();
 
     // --- Injeção de Configurações ---
-    //@Value("${microservico.rondon.url}")
-    //private String rondonUrl;
+    @Value("${microservico.rondon.url}")
+    private String rondonUrl;
     @Value("${microservico.cart.url}")
     private String cartUrl;
-    //@Value("${microservico.eixo.url}")
-    //private String eixoUrl;
-    //@Value("${microservico.entrevias.url}")
-    //private String entreviasUrl;
+    @Value("${microservico.eixo.url}")
+    private String eixoUrl;
+    @Value("${microservico.entrevias.url}")
+    private String entreviasUrl;
 
     /**
      * NOVO: Este método é executado uma vez após a construção do serviço
@@ -48,9 +48,9 @@ public class RadarsBFFService {
         log.info("Inicializando mapa de URLs dos serviços de radares...");
         // CORREÇÃO: Descomentado para popular o mapa.
         serviceUrlMap.put("cart", cartUrl);
-        //serviceUrlMap.put("eixo", eixoUrl);
-        //serviceUrlMap.put("entrevias", entreviasUrl);
-        //serviceUrlMap.put("rondon", rondonUrl);
+        serviceUrlMap.put("eixo", eixoUrl);
+        serviceUrlMap.put("entrevias", entreviasUrl);
+        serviceUrlMap.put("rondon", rondonUrl);
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
 
