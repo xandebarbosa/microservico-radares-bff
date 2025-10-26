@@ -6,6 +6,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreaker;
+import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -28,16 +30,24 @@ public class RadarsBFFService {
     private final WebClient webClient;
     private final RealtimeUpdateService realtimeUpdateService;
     private final Map<String, String> serviceUrlMap = new HashMap<>();
+    private final ReactiveCircuitBreakerFactory cbFactory;
 
     // --- Injeção de Configurações ---
-    @Value("${microservico.rondon.url}")
-    private String rondonUrl;
-    @Value("${microservico.cart.url}")
-    private String cartUrl;
-    @Value("${microservico.eixo.url}")
-    private String eixoUrl;
-    @Value("${microservico.entrevias.url}")
-    private String entreviasUrl;
+    //@Value("${microservico.rondon.url}")
+    //private String rondonUrl;
+    //@Value("${microservico.cart.url}")
+    //private String cartUrl;
+    //@Value("${microservico.eixo.url}")
+    //private String eixoUrl;
+    //@Value("${microservico.entrevias.url}")
+    //private String entreviasUrl;
+
+    // ALTERE o construtor para receber o Builder
+    public RadarsBFFService(WebClient.Builder webClientBuilder, RealtimeUpdateService realtimeUpdateService, ReactiveCircuitBreakerFactory cbFactory) {
+        this.webClient = webClientBuilder.build(); // Constrói o WebClient aqui
+        this.realtimeUpdateService = realtimeUpdateService;
+        this.cbFactory = cbFactory;
+    }
 
     /**
      * NOVO: Este método é executado uma vez após a construção do serviço
@@ -46,11 +56,12 @@ public class RadarsBFFService {
     @PostConstruct
     public void init() {
         log.info("Inicializando mapa de URLs dos serviços de radares...");
-        // CORREÇÃO: Descomentado para popular o mapa.
-        serviceUrlMap.put("cart", cartUrl);
-        serviceUrlMap.put("eixo", eixoUrl);
-        serviceUrlMap.put("entrevias", entreviasUrl);
-        serviceUrlMap.put("rondon", rondonUrl);
+        // Mapeie para os NOMES DE SERVIÇO (spring.application.name)
+        // Por padrão, o Eureka registra os nomes em MAIÚSCULAS.
+        serviceUrlMap.put("cart", "MICROSERVICO-RADAR-CART");
+        serviceUrlMap.put("eixo", "MICROSERVICO-RADAR-EIXO");
+        serviceUrlMap.put("entrevias", "MICROSERVICO-RADAR-ENTREVIAS");
+        serviceUrlMap.put("rondon", "MICROSSERVICO-RADAR-RONDON");
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
 
@@ -159,7 +170,7 @@ public class RadarsBFFService {
     // =========================================================================
 
     private Mono<RadarPageDTO> fetchPageFromMicroservice(String baseUrl, String placa, String praca, String rodovia, String km, String sentido, LocalDate data, LocalTime horaInicial, LocalTime horaFinal, Pageable pageable) {
-        UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromHttpUrl(baseUrl + "/radares/filtros")
+        UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString("http://" + baseUrl + "/radares/filtros")
                 .queryParam("page", pageable.getPageNumber())
                 .queryParam("size", pageable.getPageSize())
                 .queryParam("sort", "data,desc");
@@ -174,22 +185,36 @@ public class RadarsBFFService {
         if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
 
         String urlFinal = uriBuilder.toUriString();
-        log.info("BFF chamando: {}", urlFinal);
+        log.info("BFF chamando serviço via Service Discovery: {}", urlFinal);
 
-        return webClient.get().uri(urlFinal).retrieve()
+        // --- LÓGICA DO CIRCUIT BREAKER ---
+        ReactiveCircuitBreaker circuitBreaker = cbFactory.create("radaresService");
+
+        Mono<RadarPageDTO> remoteCall = webClient.get().uri(urlFinal).retrieve()
                 .bodyToMono(RadarPageDTO.class)
-                .doOnError(e -> log.error("BFF: ERRO DETALHADO ao chamar {}: ", urlFinal, e))
-                .onErrorResume(e -> {
-                    log.warn("BFF: Falha na chamada para {}. Retornando página vazia.", urlFinal);
-                    return Mono.just(new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0)));
-                });
+                .doOnError(e -> log.error("BFF: ERRO DETALHADO ao chamar {}: ", urlFinal, e));
+
+        // Envolve a chamada remota com o circuit breaker e define um fallback
+        return circuitBreaker.run(remoteCall, throwable -> {
+            log.warn("Circuit Breaker ATIVADO para o serviço de radares: {}. Causa: {}", baseUrl, throwable.getMessage());
+            // Retorna uma página vazia como fallback
+            return Mono.just(new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0)));
+        });
+
+//        return webClient.get().uri(urlFinal).retrieve()
+//                .bodyToMono(RadarPageDTO.class)
+//                .doOnError(e -> log.error("BFF: ERRO DETALHADO ao chamar {}: ", urlFinal, e))
+//                .onErrorResume(e -> {
+//                    log.warn("BFF: Falha na chamada para {}. Retornando página vazia.", urlFinal);
+//                    return Mono.just(new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0)));
+//                });
     }
 
     private Flux<RadarDTO> fetchAllPagesFromMicroservice(String baseUrl, String placa, String praca, String rodovia, String km, String sentido, LocalDate data, LocalTime horaInicial, LocalTime horaFinal) {
         final int pageSize = 1000;
         return Mono.just(0)
                 .expand(pageNumber -> {
-                    UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromHttpUrl(baseUrl + "/radares/filtros")
+                    UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString("http://" + baseUrl + "/radares/filtros")
                             .queryParam("page", pageNumber).queryParam("size", pageSize);
                     if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
                     if (praca != null && !praca.isBlank()) uriBuilder.queryParam("praca", praca);

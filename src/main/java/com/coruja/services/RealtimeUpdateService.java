@@ -33,7 +33,7 @@ public class RealtimeUpdateService {
     }
 
     // Este método "ouve" a fila que recebe os dados de todos os radares
-    @RabbitListener(queues = RabbitMQConfig.QUEUE_NAME) // IMPORTANTE: Este deve ser o nome da sua fila principal
+    @RabbitListener(queues = RabbitMQConfig.RADARES_DATA_QUEUE) // IMPORTANTE: Este deve ser o nome da sua fila principal
     public void receiveRadarMessage(String message) {
         logger.info("Mensagem recebida do RabbitMQ: {}", message);
         try {
