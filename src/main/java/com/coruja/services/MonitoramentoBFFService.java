@@ -23,7 +23,6 @@ import reactor.core.publisher.Mono;
 import java.util.Collections;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class MonitoramentoBFFService {
 

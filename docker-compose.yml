@@ -16,6 +16,8 @@ services:
     environment:
       # Ativa o perfil de produção para usar o application-prod.properties
       - SPRING_PROFILES_ACTIVE=prod
+      - RABBITMQ_USER=${RABBITMQ_USER}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
       # Se você tiver segredos no .env da infraestrutura, passe-os aqui
       # - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     networks:
