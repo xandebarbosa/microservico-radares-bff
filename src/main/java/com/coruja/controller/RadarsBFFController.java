@@ -11,6 +11,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
@@ -34,6 +35,7 @@ public class RadarsBFFController {
      * @return Uma página de resultados de radares para a placa informada.
      */
     @GetMapping("/placa/{placa}")
+    @PreAuthorize("hasAnyRole('user', 'admin')")
     public Mono<ResponseEntity<RadarPageDTO>> buscarPorPlaca(
             @PathVariable String placa,
             Pageable pageable
@@ -49,6 +51,7 @@ public class RadarsBFFController {
      * Endpoint genérico que pode buscar em todas ou em concessionárias específicas.
      */
     @GetMapping("/filtros")
+    @PreAuthorize("hasAnyRole('user', 'admin')")
     public Mono<ResponseEntity<RadarPageDTO>> buscarComTodosOsFiltros(
             @RequestParam(required = false) List<String> concessionaria,
             @RequestParam(required = false) String placa,

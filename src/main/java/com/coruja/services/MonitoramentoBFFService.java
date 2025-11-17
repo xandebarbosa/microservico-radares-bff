@@ -32,7 +32,7 @@ public class MonitoramentoBFFService {
 //    @Value("${microservico.monitoramento.url}")
 //    private String monitoramentoUrl;
 
-    private static final String MONITORAMENTO_SERVICE_ID = "microservico-monitoramento";
+    private static final String MONITORAMENTO_SERVICE_ID = "MICROSERVICO-MONITORAMENTO";
 
     public MonitoramentoBFFService(WebClient.Builder webClientBuilder, ReactiveCircuitBreakerFactory cbFactory) {
         this.webClient = webClientBuilder.build();
