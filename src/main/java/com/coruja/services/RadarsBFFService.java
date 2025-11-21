@@ -116,15 +116,29 @@ public class RadarsBFFService {
             return Mono.just(Collections.emptyList());
         }
 
-        Flux<RadarDTO> todosOsRadaresFlux = Flux.fromIterable(urlsParaChamar)
-                .flatMap(baseUrl -> fetchAllPagesFromMicroservice(baseUrl, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal));
+        // 1. Definir o comparador que o merge usará
+        // (Deve ser o mesmo usado pelo 'sort' dos microsserviços)
+        Comparator<RadarDTO> comparador = Comparator
+                .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder()));
 
-        return todosOsRadaresFlux.collectList()
-                .map(lista -> {
-                    lista.sort(Comparator.comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
-                            .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
-                    return lista;
-                });
+        // 2. Criar uma lista de Flux<RadarDTO>, um para cada serviço
+        List<Flux<RadarDTO>> fluxosOrdenados = urlsParaChamar.stream()
+                .map(baseUrl -> fetchAllPagesFromMicroservice(
+                        baseUrl, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
+                ))
+                .collect(Collectors.toList());
+
+        // 3. Usar mergeComparing.
+        // Isso puxa um item de cada fluxo, compara-os, emite o "maior" (mais recente),
+        // e só então puxa o próximo item do fluxo que "ganhou".
+        // A memória fica constante (O(k) onde k = nº de serviços).
+        Flux<RadarDTO> fluxoAgregadoOrdenado = Flux.mergeComparing(comparador, fluxosOrdenados.toArray(new Flux[0]));
+
+        // 4. Coletar o resultado. O .collectList() ainda é necessário porque
+        // o controller espera uma List<RadarDTO> para a exportação.
+        // A diferença é que agora não há ordenação (CPU) nem picos de memória (RAM).
+        return fluxoAgregadoOrdenado.collectList();
     }
 
     // --- Métodos para popular filtros do Frontend ---
@@ -214,15 +228,18 @@ public class RadarsBFFService {
         return Mono.just(0)
                 .expand(pageNumber -> {
                     UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString("http://" + baseUrl + "/radares/filtros")
-                            .queryParam("page", pageNumber).queryParam("size", pageSize);
-                    if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
-                    if (praca != null && !praca.isBlank()) uriBuilder.queryParam("praca", praca);
-                    if (rodovia != null && !rodovia.isBlank()) uriBuilder.queryParam("rodovia", rodovia);
-                    if (km != null && !km.isBlank()) uriBuilder.queryParam("km", km);
-                    if (sentido != null && !sentido.isBlank()) uriBuilder.queryParam("sentido", sentido);
-                    if (data != null) uriBuilder.queryParam("data", data.toString());
-                    if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial.toString());
-                    if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
+                            .queryParam("page", pageNumber)
+                            .queryParam("size", pageSize)
+                            .queryParam("sort", "data,desc")
+                            .queryParam("sort", "hora,desc");
+                                if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
+                                if (praca != null && !praca.isBlank()) uriBuilder.queryParam("praca", praca);
+                                if (rodovia != null && !rodovia.isBlank()) uriBuilder.queryParam("rodovia", rodovia);
+                                if (km != null && !km.isBlank()) uriBuilder.queryParam("km", km);
+                                if (sentido != null && !sentido.isBlank()) uriBuilder.queryParam("sentido", sentido);
+                                if (data != null) uriBuilder.queryParam("data", data.toString());
+                                if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial.toString());
+                                if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
 
                     return webClient.get().uri(uriBuilder.toUriString()).retrieve()
                             .bodyToMono(RadarPageDTO.class)
@@ -258,18 +275,35 @@ public class RadarsBFFService {
                 .flatMap(p -> p.getContent().stream())
                 .collect(Collectors.toList());
 
+        // 1. Ordena a lista combinada (ex: 4 serviços * 10 itens/pág = 40 itens).
+        //    Isso é rápido e aceitável para paginação.
         combinedContent.sort(Comparator.comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
                 .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
 
+        // 2. Calcula o total de elementos (somando os totais de cada página)
         long totalElements = pages.stream()
                 .filter(p -> p != null && p.getPage() != null)
                 .mapToLong(p -> p.getPage().getTotalElements())
                 .sum();
 
+        // 3. CORREÇÃO: Aplica a paginação (limit) na lista combinada
+        //    Se o usuário pediu page 0, size 10, pegamos os 10 primeiros da lista ordenada.
+        //    (Nota: Isso só funciona para a primeira página (page 0). Uma paginação
+        //    verdadeira (page > 0) exigiria a mesma lógica do Flux.mergeComparing
+        //    com .skip() e .take(), o que é bem mais complexo).
+        //
+        //    Para simplificar e corrigir o bug principal (retornar dados a mais):
+        List<RadarDTO> paginatedContent = combinedContent.stream()
+                .limit(pageable.getPageSize()) // <-- ADICIONE ESTA LINHA
+                .collect(Collectors.toList());
+
+        // 4. Calcula os metadados da página
         int totalPages = pageable.getPageSize() > 0 ? (int) Math.ceil((double) totalElements / pageable.getPageSize()) : 0;
         PageMetadata metadata = new PageMetadata(pageable.getPageNumber(), pageable.getPageSize(), totalElements, totalPages);
 
-        log.info("BFF: Agregação finalizada. Total de elementos: {}. Itens combinados: {}", totalElements, combinedContent.size());
-        return new RadarPageDTO(combinedContent, metadata);
+        log.info("BFF: Agregação finalizada. Total de elementos: {}. Itens combinados: {}. Itens retornados: {}",
+                totalElements, combinedContent.size(), paginatedContent.size()); // <-- Log atualizado
+
+        return new RadarPageDTO(paginatedContent, metadata); // <-- Retorna a lista paginada
     }
 }

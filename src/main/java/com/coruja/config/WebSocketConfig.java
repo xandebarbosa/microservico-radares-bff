@@ -36,7 +36,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         //registry.addEndpoint("/ws").setAllowedOriginPatterns("*").withSockJS();
         registry.addEndpoint("/ws")
                 // 🔥 PERMITE conexão do frontend Next.js
-                .setAllowedOriginPatterns("*")
+                .setAllowedOrigins("http://192.168.0.6:3000", "http://localhost:3000")
                 .setHandshakeHandler(new CustomHandshakeHandler())
                 .addInterceptors(new JwtHandshakeInterceptor(jwtDecoder))
                 // 🔥 Habilita SockJS (fallback para clients sem WS)
