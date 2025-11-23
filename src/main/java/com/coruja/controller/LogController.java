@@ -3,12 +3,19 @@ package com.coruja.controller;
 import com.coruja.services.LogService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Controller para busca de logs no Elasticsearch.
+ */
 @RestController
 @RequestMapping("/api/logs")
 public class LogController {
@@ -19,14 +26,21 @@ public class LogController {
         this.logService = logService;
     }
 
+    /**
+     * Busca logs no Elasticsearch com paginação.
+     * @param query Query de busca (padrão: "*" para todos).
+     * @param page Número da página (padrão: 0).
+     * @param size Tamanho da página (padrão: 50).
+     * @return Lista de logs encontrados.
+     */
     @GetMapping("/search")
-    public Mono<ResponseEntity<Object>> searchLogs(
+    @PreAuthorize("hasAnyRole('admin')")
+    public ResponseEntity<Object> searchLogs(
             @RequestParam(defaultValue = "*") String query,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size
     ) {
-        // Retorna um Object para simplificar, mas o ideal seria um DTO de página de logs
-        return logService.searchLogs(query, page, size)
-                .map(ResponseEntity::ok);
+        List<Map<String, Object>> result = (List<Map<String, Object>>) logService.searchLogs(query, page, size);
+        return ResponseEntity.ok(result);
     }
 }

@@ -26,9 +26,6 @@ public class RadarsBFFController {
 
     private final RadarsBFFService radarsBFFService;
 
-    // =================================================================
-    // NOVO ENDPOINT 1: Busca simples e direta por placa
-    // =================================================================
     /**
      * Busca todos os registros de radares para uma placa específica.
      * @param placa A placa do veículo a ser pesquisada.     *
@@ -36,23 +33,34 @@ public class RadarsBFFController {
      */
     @GetMapping("/placa/{placa}")
     @PreAuthorize("hasAnyRole('user', 'admin')")
-    public Mono<ResponseEntity<RadarPageDTO>> buscarPorPlaca(
+    public ResponseEntity<RadarPageDTO> buscarPorPlaca(
             @PathVariable String placa,
             Pageable pageable
     ) {
-        // Chama o método unificado, passando a lista de concessionárias como nula para buscar em todas.
-        return radarsBFFService.buscarComFiltros(
+        RadarPageDTO result = radarsBFFService.buscarComFiltros(
                 null, placa, null, null, null, null, null, null, null, pageable
-        ).map(ResponseEntity::ok);
+        );
+        return ResponseEntity.ok(result);
     }
 
 
     /**
      * Endpoint genérico que pode buscar em todas ou em concessionárias específicas.
+     * @param concessionaria Lista de concessionárias para filtrar (opcional).
+     * @param placa Placa do veículo (opcional).
+     * @param praca Praça de pedágio (opcional).
+     * @param rodovia Código da rodovia (opcional).
+     * @param km Quilômetro da rodovia (opcional).
+     * @param sentido Sentido da via (opcional).
+     * @param data Data específica (opcional).
+     * @param horaInicial Hora inicial do intervalo (opcional).
+     * @param horaFinal Hora final do intervalo (opcional).
+     * @param pageable Parâmetros de paginação.
+     * @return Página com os resultados filtrados.
      */
     @GetMapping("/filtros")
     @PreAuthorize("hasAnyRole('user', 'admin')")
-    public Mono<ResponseEntity<RadarPageDTO>> buscarComTodosOsFiltros(
+    public ResponseEntity<RadarPageDTO> buscarComTodosOsFiltros(
             @RequestParam(required = false) List<String> concessionaria,
             @RequestParam(required = false) String placa,
             @RequestParam(required = false) String praca,
@@ -64,20 +72,29 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             Pageable pageable
     ) {
-        return radarsBFFService.buscarComFiltros(
+        RadarPageDTO result = radarsBFFService.buscarComFiltros(
                 concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal, pageable
-        ).map(ResponseEntity::ok);
+        );
+        return ResponseEntity.ok(result);
     }
 
-    // =================================================================
-    // NOVO ENDPOINT: Rota específica por concessionária
-    // =================================================================
     /**
      * Busca registros de radares em uma concessionária específica com filtros.
      * @param nomeConcessionaria O nome da concessionária (ex: rondon, cart, eixo, entrevias).
+     * @param placa Placa do veículo (opcional).
+     * @param praca Praça de pedágio (opcional).
+     * @param rodovia Código da rodovia (opcional).
+     * @param km Quilômetro da rodovia (opcional).
+     * @param sentido Sentido da via (opcional).
+     * @param data Data específica (opcional).
+     * @param horaInicial Hora inicial do intervalo (opcional).
+     * @param horaFinal Hora final do intervalo (opcional).
+     * @param pageable Parâmetros de paginação.
+     * @return Página com os resultados filtrados da concessionária.
      */
     @GetMapping("/concessionaria/{nomeConcessionaria}/filtros")
-    public Mono<ResponseEntity<RadarPageDTO>> buscarPorConcessionaria(
+    @PreAuthorize("hasAnyRole('user', 'admin')")
+    public ResponseEntity<RadarPageDTO> buscarPorConcessionaria(
             @PathVariable String nomeConcessionaria,
             @RequestParam(required = false) String placa,
             @RequestParam(required = false) String praca,
@@ -89,42 +106,63 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             Pageable pageable
     ) {
-        return radarsBFFService.buscarComFiltros(
+        RadarPageDTO result = radarsBFFService.buscarComFiltros(
                 List.of(nomeConcessionaria), placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal, pageable
-        ).map(ResponseEntity::ok);
+        );
+        return ResponseEntity.ok(result);
     }
 
     @GetMapping("/concessionaria/{nomeConcessionaria}/opcoes-filtro")
-    public Mono<ResponseEntity<FilterOptionsDTO>> getFiltersOptions(@PathVariable String nomeConcessionaria) {
-        return radarsBFFService.getFilterOptionsForConcessionaria(nomeConcessionaria)
-                .map(ResponseEntity::ok);
-    }
-
-    // =================================================================
-    // NOVO ENDPOINT: Rota para buscar KMs de uma rodovia específica
-    // =================================================================
-    @GetMapping("/concessionaria/{nomeConcessionaria}/kms-por-rodovia")
-    public Mono<ResponseEntity<List<String>>> getKmsByRodovia(
-            @PathVariable String nomeConcessionaria,
-            @RequestParam String rodovia
-    ) {
-        return radarsBFFService.getKmsForRodoviaByConcessionaria(nomeConcessionaria, rodovia)
-                .map(ResponseEntity::ok);
-    }
-
-    @GetMapping("/ultimos-processados")
-    public Mono<ResponseEntity<List<RadarDTO>>> getUltimosProcessados() {
-        // Usamos Mono.fromCallable para não bloquear a thread principal
-        return Mono.fromCallable(() -> radarsBFFService.getUltimosRadaresProcessados())
-                .map(ResponseEntity::ok);
+    @PreAuthorize("hasAnyRole('user', 'admin')")
+    public ResponseEntity<FilterOptionsDTO> getFiltersOptions(@PathVariable String nomeConcessionaria) {
+        FilterOptionsDTO result = radarsBFFService.getFilterOptionsForConcessionaria(nomeConcessionaria);
+        return ResponseEntity.ok(result);
     }
 
     /**
-     * Endpoint para exportar todos os dados de uma busca para Excel.
-     * Não utiliza paginação, pois busca todos os resultados de uma vez.
+     * Busca os KMs disponíveis para uma rodovia específica em uma concessionária.
+     * @param nomeConcessionaria Nome da concessionária.
+     * @param rodovia Código da rodovia.
+     * @return Lista de KMs disponíveis.
+     */
+    @GetMapping("/concessionaria/{nomeConcessionaria}/kms-por-rodovia")
+    @PreAuthorize("hasAnyRole('user', 'admin')")
+    public ResponseEntity<List<String>> getKmsByRodovia(
+            @PathVariable String nomeConcessionaria,
+            @RequestParam String rodovia
+    ) {
+        List<String> result = radarsBFFService.getKmsForRodoviaByConcessionaria(nomeConcessionaria, rodovia);
+        return ResponseEntity.ok(result);
+    }
+
+    /**
+     * Retorna os últimos radares processados (do cache em memória).
+     * Útil para dashboards e monitoramento em tempo real.
+     * @return Lista com os últimos radares de cada concessionária.
+     */
+    @GetMapping("/ultimos-processados")
+    @PreAuthorize("hasAnyRole('user', 'admin')")
+    public ResponseEntity<List<RadarDTO>> getUltimosProcessados() {
+        List<RadarDTO> result = radarsBFFService.getUltimosRadaresProcessados();
+        return ResponseEntity.ok(result);
+    }
+
+    /**
+     * Exporta todos os dados de uma busca para Excel.
+     * Não utiliza paginação - retorna todos os resultados de uma vez.
+     * @param concessionaria Lista de concessionárias para filtrar (opcional).
+     * @param placa Placa do veículo (opcional).
+     * @param praca Praça de pedágio (opcional).
+     * @param rodovia Código da rodovia (opcional).
+     * @param km Quilômetro da rodovia (opcional).
+     * @param sentido Sentido da via (opcional).
+     * @param data Data específica (opcional).
+     * @param horaInicial Hora inicial do intervalo (opcional).
+     * @param horaFinal Hora final do intervalo (opcional).
+     * @return Lista completa de radares que atendem aos filtros.
      */
     @GetMapping("/exportar")
-    public Mono<ResponseEntity<List<RadarDTO>>> exportarComFiltros(
+    public ResponseEntity<List<RadarDTO>> exportarComFiltros(
             @RequestParam(required = false) List<String> concessionaria,
             @RequestParam(required = false) String placa,
             @RequestParam(required = false) String praca,
@@ -135,8 +173,9 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal
     ) {
-        return radarsBFFService.buscarTodosParaExportacao(
+        List<RadarDTO> result = radarsBFFService.buscarTodosParaExportacao(
                 concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
-        ).map(ResponseEntity::ok);
+        );
+        return ResponseEntity.ok(result);
     }
 }

@@ -42,30 +42,26 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
         String token = extractToken(request);
 
         if (token == null || token.isBlank()) {
-            // Sem token: retornamos true para permitir handshake (caso queira forçar autenticação aqui retorne false).
-            // Como o Gateway pode bloquear, aqui preferimos permitir e deixar autenticação ser exigida em mensagens ou business logic,
-            // mas se quiser fechar handshake com UNAUTHORIZED, retorne false e defina response status.
+            System.out.println("⚠️ Handshake sem token - permitindo conexão");
+            // ✅ PERMITE handshake sem token (autenticação será feita no CONNECT)
             return true;
         }
-
         try {
             Jwt jwt = jwtDecoder.decode(token);
-
-            // você pode extrair roles/authorities se quiser
             String subject = jwt.getSubject();
-            // cria um Principal simples com o subject
+
             StompPrincipal principal = new StompPrincipal(subject);
-
-            // armazena para o HandshakeHandler extrair
             attributes.put("stompPrincipal", principal);
-
-            // opcional: guarde claims importantes também
             attributes.put("jwtClaims", jwt.getClaims());
 
+            System.out.println("✅ Handshake autenticado para: " + subject);
             return true;
+
         } catch (JwtException ex) {
-            // Token inválido: rejeitar handshake
-            return false;
+            System.err.println("❌ Token inválido no handshake: " + ex.getMessage());
+            // ✅ PERMITE handshake mesmo com token inválido
+            // A validação real acontece no WebSocketAuthInterceptor
+            return true;
         }
     }
 
@@ -74,27 +70,33 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
                                org.springframework.http.server.ServerHttpResponse response,
                                WebSocketHandler wsHandler,
                                Exception exception) {
-        // nada a fazer
+        if (exception != null) {
+            System.err.println("❌ Erro no handshake: " + exception.getMessage());
+        }
     }
 
     private String extractToken(ServerHttpRequest request) {
-        // 1) query param ?access_token=...
+        // 1) Query param ?access_token=...
         if (request instanceof ServletServerHttpRequest servletReq) {
             HttpServletRequest httpReq = servletReq.getServletRequest();
             String q = httpReq.getParameter("access_token");
-            if (q != null && !q.isBlank()) return q;
+            if (q != null && !q.isBlank()) {
+                System.out.println("🔑 Token encontrado na query string");
+                return q;
+            }
         }
 
         // 2) Authorization header
         List<String> authHeaders = request.getHeaders().getOrEmpty(HttpHeaders.AUTHORIZATION);
         if (!authHeaders.isEmpty()) {
-            // pega o primeiro header "Bearer <token>"
             String header = authHeaders.get(0);
             if (header.toLowerCase().startsWith("bearer ")) {
+                System.out.println("🔑 Token encontrado no header Authorization");
                 return header.substring(7).trim();
             }
         }
 
+        System.out.println("⚠️ Nenhum token encontrado no handshake");
         return null;
     }
 

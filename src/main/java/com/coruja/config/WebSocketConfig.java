@@ -2,6 +2,7 @@ package com.coruja.config;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.simp.config.ChannelRegistration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
@@ -13,10 +14,12 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtDecoder jwtDecoder;
+    private final WebSocketAuthInterceptor webSocketAuthInterceptor;
 
     @Autowired
-    public WebSocketConfig(JwtDecoder jwtDecoder) {
+    public WebSocketConfig(JwtDecoder jwtDecoder, WebSocketAuthInterceptor authInterceptor) {
         this.jwtDecoder = jwtDecoder;
+        this.webSocketAuthInterceptor = authInterceptor;
     }
 
     @Override
@@ -30,16 +33,20 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
-        // Registra o endpoint "/ws" para os clientes se conectarem.
-        // É o "handshake" inicial do WebSocket.
-        // setAllowedOriginPatterns("*") permite a conexão de qualquer origem (importante para CORS)
-        //registry.addEndpoint("/ws").setAllowedOriginPatterns("*").withSockJS();
         registry.addEndpoint("/ws")
-                // 🔥 PERMITE conexão do frontend Next.js
-                .setAllowedOrigins("http://192.168.0.6:3000", "http://localhost:3000")
+                //  Permite todas as origens (ajuste em produção)
+                .setAllowedOriginPatterns("*")
+                // IMPORTANTE: Usa o CustomHandshakeHandler
                 .setHandshakeHandler(new CustomHandshakeHandler())
+                // Adiciona o interceptor JWT
                 .addInterceptors(new JwtHandshakeInterceptor(jwtDecoder))
-                // 🔥 Habilita SockJS (fallback para clients sem WS)
+                // Habilita SockJS
                 .withSockJS();
+    }
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        // ✅ Registra o interceptor de autenticação
+        registration.interceptors(webSocketAuthInterceptor);
     }
 }
