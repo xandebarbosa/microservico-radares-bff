@@ -22,7 +22,7 @@ public class NotificationController {
     // 🔥 Envia para todos inscritos em /topic/notificacoes
     @MessageMapping("/notify")
     @SendTo("/topic/notificacoes")
-    @PreAuthorize("hasRole('USER') or hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public NotificationMessage notifyAll(NotificationMessage msg) {
         log.info("📢 Mensagem recebida (broadcast): {}", msg.getMensagem());
         return msg;
@@ -31,7 +31,7 @@ public class NotificationController {
     // 🔥 Envia mensagem APENAS para um usuário específico
     // Frontend envia para /app/notify-user/{userId}
     @MessageMapping("/notify-user/{userId}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public void notifyUser(
             @DestinationVariable String userId,
             NotificationMessage msg

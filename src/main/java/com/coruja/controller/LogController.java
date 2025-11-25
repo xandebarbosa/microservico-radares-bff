@@ -34,7 +34,7 @@ public class LogController {
      * @return Lista de logs encontrados.
      */
     @GetMapping("/search")
-    @PreAuthorize("hasAnyRole('admin')")
+    @PreAuthorize("hasAnyRole('ADMIN')")
     public ResponseEntity<Object> searchLogs(
             @RequestParam(defaultValue = "*") String query,
             @RequestParam(defaultValue = "0") int page,

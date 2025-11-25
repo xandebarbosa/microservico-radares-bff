@@ -19,29 +19,23 @@ import java.time.Duration;
 public class CircuitBreakerConfiguration {
 
     @Bean
-    public CircuitBreakerFactory circuitBreakerFactory(CircuitBreakerRegistry registry) {
-        Resilience4JCircuitBreakerFactory factory = new Resilience4JCircuitBreakerFactory();
-        factory.configureCircuitBreakerRegistry(registry);
-        return factory;
-    }
-
-    @Bean
     public Customizer<Resilience4JCircuitBreakerFactory> defaultCustomizer() {
         return factory -> factory.configureDefault(id -> new Resilience4JConfigBuilder(id)
                 .timeLimiterConfig(TimeLimiterConfig.custom()
                         .timeoutDuration(Duration.ofSeconds(10))
                         .build())
                 .circuitBreakerConfig(CircuitBreakerConfig.custom()
-                        // Threshold de falhas para abrir o circuito
+                        // Threshold de falhas para abrir o circuito (50%)
                         .failureRateThreshold(50)
                         // Número mínimo de chamadas antes de calcular taxa de falha
                         .minimumNumberOfCalls(5)
-                        // Tempo que o circuito fica aberto
+                        // Tempo que o circuito fica aberto (30s)
                         .waitDurationInOpenState(Duration.ofSeconds(30))
                         // Número de chamadas permitidas no estado half-open
                         .permittedNumberOfCallsInHalfOpenState(3)
-                        // Threshold de chamadas lentas
+                        // Threshold de chamadas lentas (50%)
                         .slowCallRateThreshold(50)
+                        // Duração para considerar uma chamada lenta (5s)
                         .slowCallDurationThreshold(Duration.ofSeconds(5))
                         .build())
                 .build());

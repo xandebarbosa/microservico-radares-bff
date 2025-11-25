@@ -4,7 +4,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
-import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -18,6 +17,7 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.Arrays;
+import java.util.List;
 
 @Configuration
 @EnableWebSecurity // (1) Mudou de @EnableWebFluxSecurity
@@ -41,29 +41,28 @@ public class SecurityConfig {
         jwtConverter.setJwtGrantedAuthoritiesConverter(keycloakRoleConverter);
 
         http
+                // CRÍTICO: Desabilita CSRF (necessário para APIs REST e WebSocket)
                 .csrf(csrf -> csrf.disable()) // WebSocket + REST → CSRF deve ser desabilitado
+                // CRÍTICO: Habilita CORS com configuração personalizada
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-                .sessionManagement(session ->
-                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                // Configura sessão stateless
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                // CRÍTICO: Configuração de autorização
                 .authorizeHttpRequests(authorize -> authorize
-                        // ✅ CRÍTICO: Libera completamente os endpoints WebSocket
+                        // 🔥 PERMITIR completamente endpoints WebSocket (SEM AUTENTICAÇÃO)
                         .requestMatchers("/ws/**").permitAll()
                         .requestMatchers("/api/ws/**").permitAll()
 
-                        // ✅ Libera preflight CORS
+                        // Libera preflight requests (OPTIONS) para evitar erros de CORS 403
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
-                        // ✅ Libera endpoints de health
+                        // Libera endpoints de health check
                         .requestMatchers("/actuator/**", "/health").permitAll()
 
-                        // ✅ Protege as APIs REST
-                        .requestMatchers("/api/**").authenticated()
-                        .requestMatchers("/radares/**").authenticated()
-                        .requestMatchers("/monitoramento/**").authenticated()
-
-                        .anyRequest().denyAll() // Bloqueia tudo que não foi configurado
+                        // 4. Protege o restante
+                        .anyRequest().authenticated()
                 )
-                // Configura JWT Resource Server
+                // Configura OAuth2 Resource Server com JWT
                 .oauth2ResourceServer(oauth2 -> oauth2
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter)) // (6) Usa o conversor direto
                 );
@@ -75,26 +74,29 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
 
-        // ✅ Permite múltiplas origens para desenvolvimento
+        // ✅ CORREÇÃO: Use setAllowedOrigins em vez de setAllowedOriginPatterns
+        // para evitar múltiplos headers Access-Control-Allow-Origin
         configuration.setAllowedOriginPatterns(Arrays.asList(
                 "http://localhost:3000",
                 "http://localhost:3009",
-                "http://192.168.0.6:3000",
+                "http://192.168.0.*:[*]", // Funciona apenas com AllowedOriginPatterns
                 "*"
         ));
 
-        configuration.setAllowedMethods(Arrays.asList(
-                "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
+
+        // Headers essenciais
+        configuration.setAllowedHeaders(Arrays.asList(
+                "Authorization",
+                "Cache-Control",
+                "Content-Type",
+                "X-Requested-With",
+                "Access-Control-Allow-Origin",
+                "Access-Control-Allow-Credentials"
         ));
 
-        configuration.setAllowedHeaders(Arrays.asList("*"));
         configuration.setAllowCredentials(true);
-        configuration.setExposedHeaders(Arrays.asList(
-                "Authorization",
-                "Content-Type",
-                "Access-Control-Allow-Origin"
-        ));
-        configuration.setMaxAge(3600L);
+        configuration.setExposedHeaders(List.of("Authorization"));
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);

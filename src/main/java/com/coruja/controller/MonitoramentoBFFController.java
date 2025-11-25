@@ -29,7 +29,7 @@ public class MonitoramentoBFFController {
      * @return Página com as placas monitoradas.
      */
     @GetMapping
-    @PreAuthorize("hasAnyRole('user', 'admin')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<Page<PlacaMonitoradaDTO>> listar(Pageable pageable) {
         Page<PlacaMonitoradaDTO> result = (Page<PlacaMonitoradaDTO>) service.listarMonitorados(pageable);
         return ResponseEntity.ok(result);
@@ -41,7 +41,7 @@ public class MonitoramentoBFFController {
      * @return Dados da placa monitorada.
      */
     @GetMapping("/{id}")
-    @PreAuthorize("hasAnyRole('user', 'admin')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<PlacaMonitoradaDTO> buscarPorId(@PathVariable Long id) {
         PlacaMonitoradaDTO result = service.buscarPorId(id);
         return ResponseEntity.ok(result);
@@ -53,7 +53,7 @@ public class MonitoramentoBFFController {
      * @return A placa monitorada criada com status 201 (CREATED).
      */
     @PostMapping
-    @PreAuthorize("hasRole('admin')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<PlacaMonitoradaDTO> criar(@RequestBody PlacaMonitoradaDTO dto) {
         PlacaMonitoradaDTO result = service.criarMonitorado(dto);
         return ResponseEntity.status(HttpStatus.CREATED).body(result);
@@ -66,7 +66,7 @@ public class MonitoramentoBFFController {
      * @return A placa monitorada atualizada.
      */
     @PutMapping("/{id}")
-    @PreAuthorize("hasRole('admin')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<PlacaMonitoradaDTO> atualizar(
             @PathVariable Long id,
             @RequestBody PlacaMonitoradaDTO dto
@@ -81,7 +81,7 @@ public class MonitoramentoBFFController {
      * @return Status 204 (NO_CONTENT) indicando sucesso na exclusão.
      */
     @DeleteMapping("/{id}")
-    @PreAuthorize("hasRole('admin')")
+    @PreAuthorize("hasAnyRole('ADMIN')")
     public ResponseEntity<Void> deletar(@PathVariable Long id) {
         service.deletarMonitorado(id);
         return ResponseEntity.noContent().build();
@@ -93,7 +93,7 @@ public class MonitoramentoBFFController {
      * @return Página com os alertas de passagem.
      */
     @GetMapping("/alertas")
-    @PreAuthorize("hasAnyRole('user', 'admin')")
+    @PreAuthorize("hasAnyRole('ADMIN', 'USER')")
     public ResponseEntity<Page<AlertaPassagemDTO>> listarAlertas(Pageable pageable) {
         Page<AlertaPassagemDTO> result = service.listarAlertas(pageable);
         return ResponseEntity.ok(result);

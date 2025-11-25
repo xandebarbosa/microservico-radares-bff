@@ -34,13 +34,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         registry.addEndpoint("/ws")
-                //  Permite todas as origens (ajuste em produção)
-                .setAllowedOriginPatterns("*")
-                // IMPORTANTE: Usa o CustomHandshakeHandler
                 .setHandshakeHandler(new CustomHandshakeHandler())
-                // Adiciona o interceptor JWT
                 .addInterceptors(new JwtHandshakeInterceptor(jwtDecoder))
-                // Habilita SockJS
                 .withSockJS();
     }
 
