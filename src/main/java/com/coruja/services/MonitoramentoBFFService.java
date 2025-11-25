@@ -28,7 +28,8 @@ public class MonitoramentoBFFService {
 //    @Value("${microservico.monitoramento.url}")
 //    private String monitoramentoUrl;
 
-    private static final String MONITORAMENTO_SERVICE_ID = "MICROSERVICO-MONITORAMENTO";
+    //private static final String MONITORAMENTO_SERVICE_ID = "MICROSERVICO-MONITORAMENTO";
+    private static final String MONITORAMENTO_SERVICE_ID = "localhost:8089";
 
     public MonitoramentoBFFService(RestTemplate restTemplate, CircuitBreakerFactory cbFactory) {
         this.restTemplate = restTemplate;

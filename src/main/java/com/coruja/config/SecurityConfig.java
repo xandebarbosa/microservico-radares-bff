@@ -1,8 +1,10 @@
 package com.coruja.config;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -17,6 +19,7 @@ import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
 
 import java.util.Arrays;
 import java.util.List;
@@ -46,7 +49,7 @@ public class SecurityConfig {
                 // CRÍTICO: Desabilita CSRF (necessário para APIs REST e WebSocket)
                 .csrf(csrf -> csrf.disable()) // WebSocket + REST → CSRF deve ser desabilitado
                 // CRÍTICO: Habilita CORS com configuração personalizada
-                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                //.cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 // Configura sessão stateless
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 // CRÍTICO: Configuração de autorização
@@ -74,36 +77,43 @@ public class SecurityConfig {
         return http.build();
     }
 
+    /**
+     * CORREÇÃO DEFINITIVA DE CORS:
+     * Registra o filtro com prioridade máxima (Ordered.HIGHEST_PRECEDENCE).
+     * Isso garante que ele rode antes do Spring Security e do Spring MVC,
+     * aplicando os headers apenas uma vez.
+     */
     @Bean
-    public CorsConfigurationSource corsConfigurationSource() {
-        CorsConfiguration configuration = new CorsConfiguration();
+    public FilterRegistrationBean<CorsFilter> corsFilter() {
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        CorsConfiguration config = new CorsConfiguration();
 
-        // Permite o frontend local e qualquer IP da rede local (dev)
-        configuration.setAllowedOriginPatterns(Arrays.asList(
+        config.setAllowCredentials(true);
+
+        // Configure suas origens permitidas aqui
+        config.setAllowedOriginPatterns(Arrays.asList(
                 "http://localhost:3000",
                 "http://localhost:3009",
-                "http://192.168.*.*:[*]",
-                "*" // Útil para dev, remova em prod se necessário
+                "http://192.168.*.*:[*]", // Suporte para IPs de rede
+                "*"
         ));
 
-        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-
-        // Headers essenciais
-        configuration.setAllowedHeaders(Arrays.asList(
-                "Authorization",
-                "Cache-Control",
-                "Content-Type",
-                "X-Requested-With",
-                "Access-Control-Allow-Origin",
-                "Access-Control-Allow-Credentials"
+        config.setAllowedHeaders(Arrays.asList(
+                "Origin", "Content-Type", "Accept", "Authorization",
+                "X-Requested-With", "Access-Control-Request-Method",
+                "Access-Control-Request-Headers", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"
         ));
 
-        configuration.setAllowCredentials(true);
-        configuration.setExposedHeaders(List.of("Authorization"));
+        config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
 
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", configuration);
-        return source;
+        // Expõe o header Authorization para o frontend ler (se necessário)
+        config.setExposedHeaders(List.of("Authorization"));
+
+        source.registerCorsConfiguration("/**", config);
+
+        FilterRegistrationBean<CorsFilter> bean = new FilterRegistrationBean<>(new CorsFilter(source));
+        bean.setOrder(Ordered.HIGHEST_PRECEDENCE);
+        return bean;
     }
 
     @Bean

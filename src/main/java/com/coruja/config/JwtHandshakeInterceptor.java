@@ -46,8 +46,8 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
         String token = extractToken(request);
 
         if (token == null || token.isBlank()) {
-            log.warn("⚠️ [Handshake] Nenhum token encontrado. Permitindo conexão anônima (pode falhar depois).");
-            System.out.println("⚠️ Handshake sem token - permitindo conexão");
+            log.info("⚠️ [Handshake] Sem token. Permitindo conexão para validar no STOMP.");
+            // System.out.println("⚠️ Handshake sem token - permitindo conexão");
             // ✅ PERMITE handshake sem token (autenticação será feita no CONNECT)
             return true;
         }
@@ -60,11 +60,11 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
             attributes.put("jwtClaims", jwt.getClaims());
 
             log.info("✅ [Handshake] Token válido. Usuário: {}", subject);
-            System.out.println("✅ Handshake autenticado para: " + subject);
+            //System.out.println("✅ Handshake autenticado para: " + subject);
             return true;
 
         } catch (JwtException ex) {
-            log.error("❌ [Handshake] Token inválido: {}", ex.getMessage());
+            log.error("❌ Token inválido no handshake, mas permitindo conexão: {}", ex.getMessage());
             System.err.println("❌ Token inválido no handshake: " + ex.getMessage());
             // ✅ PERMITE handshake mesmo com token inválido
             // A validação real acontece no WebSocketAuthInterceptor
