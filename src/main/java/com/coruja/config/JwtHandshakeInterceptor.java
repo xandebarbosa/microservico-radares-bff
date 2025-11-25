@@ -1,5 +1,7 @@
 package com.coruja.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServletServerHttpRequest;
@@ -26,6 +28,7 @@ import java.security.Principal;
  */
 public class JwtHandshakeInterceptor implements HandshakeInterceptor {
 
+    private static final Logger log = LoggerFactory.getLogger(JwtHandshakeInterceptor.class);
     private final JwtDecoder jwtDecoder;
 
     public JwtHandshakeInterceptor(JwtDecoder jwtDecoder) {
@@ -38,10 +41,12 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
                                    WebSocketHandler wsHandler,
                                    Map<String, Object> attributes) throws Exception {
 
+        log.info("🤝 [Handshake] Iniciando conexão em: {}", request.getURI());
         // extrai token: query param ou header
         String token = extractToken(request);
 
         if (token == null || token.isBlank()) {
+            log.warn("⚠️ [Handshake] Nenhum token encontrado. Permitindo conexão anônima (pode falhar depois).");
             System.out.println("⚠️ Handshake sem token - permitindo conexão");
             // ✅ PERMITE handshake sem token (autenticação será feita no CONNECT)
             return true;
@@ -54,10 +59,12 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
             attributes.put("stompPrincipal", principal);
             attributes.put("jwtClaims", jwt.getClaims());
 
+            log.info("✅ [Handshake] Token válido. Usuário: {}", subject);
             System.out.println("✅ Handshake autenticado para: " + subject);
             return true;
 
         } catch (JwtException ex) {
+            log.error("❌ [Handshake] Token inválido: {}", ex.getMessage());
             System.err.println("❌ Token inválido no handshake: " + ex.getMessage());
             // ✅ PERMITE handshake mesmo com token inválido
             // A validação real acontece no WebSocketAuthInterceptor
@@ -71,7 +78,10 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
                                WebSocketHandler wsHandler,
                                Exception exception) {
         if (exception != null) {
+            log.error("❌ [Handshake] Erro após handshake: ", exception);
             System.err.println("❌ Erro no handshake: " + exception.getMessage());
+        } else {
+            log.debug("✅ [Handshake] Finalizado com sucesso.");
         }
     }
 
@@ -81,6 +91,7 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
             HttpServletRequest httpReq = servletReq.getServletRequest();
             String q = httpReq.getParameter("access_token");
             if (q != null && !q.isBlank()) {
+                log.debug("🔑 [Handshake] Token encontrado na URL");
                 System.out.println("🔑 Token encontrado na query string");
                 return q;
             }
@@ -91,6 +102,7 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
         if (!authHeaders.isEmpty()) {
             String header = authHeaders.get(0);
             if (header.toLowerCase().startsWith("bearer ")) {
+                log.debug("🔑 [Handshake] Token encontrado no Header");
                 System.out.println("🔑 Token encontrado no header Authorization");
                 return header.substring(7).trim();
             }

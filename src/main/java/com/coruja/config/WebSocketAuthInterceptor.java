@@ -1,5 +1,7 @@
 package com.coruja.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.simp.stomp.StompCommand;
@@ -19,6 +21,7 @@ import java.util.stream.Collectors;
 @Component
 public class WebSocketAuthInterceptor implements ChannelInterceptor {
 
+    private static final Logger log = LoggerFactory.getLogger(JwtHandshakeInterceptor.class);
     private final JwtDecoder jwtDecoder;
 
     public WebSocketAuthInterceptor(JwtDecoder jwtDecoder) {
@@ -31,6 +34,7 @@ public class WebSocketAuthInterceptor implements ChannelInterceptor {
                 MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
 
         if (accessor != null && StompCommand.CONNECT.equals(accessor.getCommand())) {
+            log.info("🔌 [STOMP Connect] Processando comando CONNECT");
             // ✅ Tenta pegar o token de múltiplos lugares
             String authToken = accessor.getFirstNativeHeader("Authorization");
 
@@ -65,14 +69,18 @@ public class WebSocketAuthInterceptor implements ChannelInterceptor {
                     );
 
                     accessor.setUser(authentication);
+                    log.info("✅ [STOMP Auth] Usuário autenticado: {} | Roles: {}", jwt.getSubject(), authorities);
 
                     System.out.println("✅ WebSocket autenticado para usuário: " + jwt.getSubject());
 
                 } catch (Exception e) {
+                    log.error("❌ [STOMP Auth] Erro ao validar token: {}", e.getMessage());
                     System.err.println("❌ Erro ao validar token JWT: " + e.getMessage());
                     // ✅ NÃO lança exceção - permite conexão sem autenticação
                     // O SecurityConfig já protege os endpoints REST
                 }
+            } else {
+                log.warn("⚠️ [STOMP Connect] Nenhum token Bearer encontrado no header STOMP");
             }
         }
 

@@ -21,7 +21,7 @@ import java.time.LocalTime;
 import java.util.List;
 
 @RestController
-@RequestMapping("/radares")
+@RequestMapping("/api/radares")
 @RequiredArgsConstructor
 @Slf4j
 public class RadarsBFFController {
@@ -150,9 +150,9 @@ public class RadarsBFFController {
     @GetMapping("/ultimos-processados")
     @PreAuthorize("hasAnyRole('ADMIN', 'USER')")
     public ResponseEntity<List<RadarDTO>> getUltimosProcessados() {
-        log.info("📡 Buscando últimos radares processados");
+        log.info("📡 [API] GET /ultimos-processados solicitado.");
         List<RadarDTO> result = radarsBFFService.getUltimosRadaresProcessados();
-        log.info("✅ Retornando {} radares", result.size());
+        log.info("✅ [API] Retornando {} radares.", result.size());
         return ResponseEntity.ok(result);
     }
 

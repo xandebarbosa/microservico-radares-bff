@@ -4,6 +4,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -12,6 +13,7 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtDecoders;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -50,21 +52,23 @@ public class SecurityConfig {
                 // CRÍTICO: Configuração de autorização
                 .authorizeHttpRequests(authorize -> authorize
                         // 🔥 PERMITIR completamente endpoints WebSocket (SEM AUTENTICAÇÃO)
-                        .requestMatchers("/ws/**").permitAll()
                         .requestMatchers("/api/ws/**").permitAll()
-
                         // Libera preflight requests (OPTIONS) para evitar erros de CORS 403
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-
                         // Libera endpoints de health check
                         .requestMatchers("/actuator/**", "/health").permitAll()
+                        // Protege todas as outras rotas da API
+                        .requestMatchers("/api/**").authenticated()
 
-                        // 4. Protege o restante
-                        .anyRequest().authenticated()
+                        .anyRequest().denyAll()
                 )
                 // Configura OAuth2 Resource Server com JWT
                 .oauth2ResourceServer(oauth2 -> oauth2
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter)) // (6) Usa o conversor direto
+                )
+                // 5. ISSO CORRIGE O ERRO DE CORS FALSO NO NAVEGADOR EM CASO DE 401/403
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
                 );
 
         return http.build();
@@ -74,13 +78,12 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
 
-        // ✅ CORREÇÃO: Use setAllowedOrigins em vez de setAllowedOriginPatterns
-        // para evitar múltiplos headers Access-Control-Allow-Origin
+        // Permite o frontend local e qualquer IP da rede local (dev)
         configuration.setAllowedOriginPatterns(Arrays.asList(
                 "http://localhost:3000",
                 "http://localhost:3009",
-                "http://192.168.0.*:[*]", // Funciona apenas com AllowedOriginPatterns
-                "*"
+                "http://192.168.*.*:[*]",
+                "*" // Útil para dev, remova em prod se necessário
         ));
 
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));

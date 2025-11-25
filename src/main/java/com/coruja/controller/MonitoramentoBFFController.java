@@ -17,7 +17,7 @@ import reactor.core.publisher.Mono;
  */
 
 @RestController
-@RequestMapping("/monitoramento")
+@RequestMapping("/api/monitoramento")
 @RequiredArgsConstructor
 public class MonitoramentoBFFController {
 
