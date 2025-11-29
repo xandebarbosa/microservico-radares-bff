@@ -11,6 +11,7 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -150,10 +151,15 @@ public class RadarsBFFController {
     @GetMapping("/ultimos-processados")
     @PreAuthorize("hasAnyRole('ADMIN', 'USER')")
     public ResponseEntity<List<RadarDTO>> getUltimosProcessados() {
-        log.info("📡 [API] GET /ultimos-processados solicitado.");
-        List<RadarDTO> result = radarsBFFService.getUltimosRadaresProcessados();
-        log.info("✅ [API] Retornando {} radares.", result.size());
-        return ResponseEntity.ok(result);
+        try {
+            log.info("📡 [API] Recebida requisição em /api/radares/ultimos-processados");
+            List<RadarDTO> result = radarsBFFService.getUltimosRadaresProcessados();
+            log.info("✅ [API] Sucesso. Retornando {} registros.", result.size());
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("🔥 [API ERROR] Falha crítica ao buscar últimos processados: ", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     /**

@@ -172,16 +172,18 @@ public class MonitoramentoBFFService {
 
         return circuitBreaker.run(
                 () -> {
-                    ResponseEntity<PageAlertaPassagemDTO> response = restTemplate.getForEntity(
-                            url,
-                            PageAlertaPassagemDTO.class
-                    );
-                    return response.getBody() != null
-                            ? response.getBody()
-                            : new PageImpl<>(Collections.emptyList(), pageable, 0);
+                    try {
+                        return restTemplate.getForObject(url, PageAlertaPassagemDTO.class);
+                    } catch (Exception e) {
+                        // ✅ LOG CRÍTICO: Mostra o erro real da conexão HTTP
+                        log.error("❌ Erro de conexão com Monitoramento: {}", e.getMessage());
+                        throw e;
+                    }
                 },
                 throwable -> {
-                    log.warn("Circuit Breaker ativo para listarAlertas");
+                    // Fallback do Circuit Breaker
+                    log.warn("⚠️ Circuit Breaker ABERTO para listarAlertas. Causa: {}", throwable.getMessage());
+                    // Retorna lista vazia em vez de erro para não quebrar o front
                     return new PageImpl<>(Collections.emptyList(), pageable, 0);
                 }
         );

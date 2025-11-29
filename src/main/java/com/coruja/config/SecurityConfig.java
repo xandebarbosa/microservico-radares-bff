@@ -10,9 +10,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configuration.WebSecurityCustomizer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtDecoders;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
@@ -32,10 +34,26 @@ public class SecurityConfig {
     @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}")
     private String issuerUri;
 
+    // Injetamos a URL das chaves (JWK) em vez do Issuer
+    @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}")
+    private String jwkSetUri;
+
     private final KeycloakRoleConverter keycloakRoleConverter;
 
     public SecurityConfig(KeycloakRoleConverter keycloakRoleConverter) {
         this.keycloakRoleConverter = keycloakRoleConverter;
+    }
+
+    /**
+     * ✅ CORREÇÃO FINAL WEBSOCKET:
+     * Diz ao Spring Security para IGNORAR totalmente estas rotas.
+     * O filtro de CORS (configurado abaixo) ainda rodará porque tem prioridade máxima,
+     * mas nenhum filtro de segurança (autenticação) será executado.
+     */
+    @Bean
+    public WebSecurityCustomizer webSecurityCustomizer() {
+        return (web) -> web.ignoring()
+                .requestMatchers("/api/ws/**");
     }
 
     @Bean
@@ -54,15 +72,14 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 // CRÍTICO: Configuração de autorização
                 .authorizeHttpRequests(authorize -> authorize
-                        // 🔥 PERMITIR completamente endpoints WebSocket (SEM AUTENTICAÇÃO)
-                        .requestMatchers("/api/ws/**").permitAll()
                         // Libera preflight requests (OPTIONS) para evitar erros de CORS 403
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        // 🔥 PERMITIR completamente endpoints WebSocket (SEM AUTENTICAÇÃO)
+                        //.requestMatchers("/api/ws/**").permitAll()
                         // Libera endpoints de health check
                         .requestMatchers("/actuator/**", "/health").permitAll()
                         // Protege todas as outras rotas da API
                         .requestMatchers("/api/**").authenticated()
-
                         .anyRequest().denyAll()
                 )
                 // Configura OAuth2 Resource Server com JWT
@@ -118,6 +135,10 @@ public class SecurityConfig {
 
     @Bean
     public JwtDecoder jwtDecoder() {
-        return JwtDecoders.fromIssuerLocation(this.issuerUri);
+        //return JwtDecoders.fromIssuerLocation(this.issuerUri);
+        // REFATORAÇÃO: Usa NimbusJwtDecoder com a URL JWK Set diretamente.
+        // Isso evita a chamada de "Discovery" no issuer-uri que estava dando timeout,
+        // e usa a rota interna (host.docker.internal) para baixar as chaves.
+        return NimbusJwtDecoder.withJwkSetUri(this.jwkSetUri).build();
     }
 }
