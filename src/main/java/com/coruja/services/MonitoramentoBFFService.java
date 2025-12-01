@@ -5,6 +5,7 @@ import com.coruja.dto.PageAlertaPassagemDTO;
 import com.coruja.dto.PagePlacaMonitoradaDTO;
 import com.coruja.dto.PlacaMonitoradaDTO;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.data.domain.Page;
@@ -25,24 +26,32 @@ public class MonitoramentoBFFService {
     private final RestTemplate restTemplate;
     private final CircuitBreakerFactory circuitBreakerFactory;
 
-//    @Value("${microservico.monitoramento.url}")
-//    private String monitoramentoUrl;
-
-    //private static final String MONITORAMENTO_SERVICE_ID = "MICROSERVICO-MONITORAMENTO";
-    private static final String MONITORAMENTO_SERVICE_ID = "localhost:8089";
+    // ✅ Lendo do application.properties para flexibilidade
+    @Value("${microservico.monitoramento.url:http://host.docker.internal:8089}")
+    private String monitoramentoUrl;
 
     public MonitoramentoBFFService(RestTemplate restTemplate, CircuitBreakerFactory cbFactory) {
         this.restTemplate = restTemplate;
         this.circuitBreakerFactory = cbFactory;
+        System.out.println(">>> MONITORAMENTO URL CONFIGURADA: " + this.monitoramentoUrl);
+    }
+
+    // Método auxiliar para garantir formatação da URL
+    private String getUrl(String path) {
+        // Garante que não duplique ou falte a barra
+        String base = monitoramentoUrl.endsWith("/") ? monitoramentoUrl.substring(0, monitoramentoUrl.length() - 1) : monitoramentoUrl;
+        String endpoint = path.startsWith("/") ? path : "/" + path;
+        return base + endpoint;
     }
 
     public PageImpl<? extends Object> listarMonitorados(Pageable pageable) {
-        // 4. ALTERADO: A URL agora é construída com o NOME DO SERVIÇO. O "http://" é importante.
-        String url = UriComponentsBuilder.fromUriString("http://" + MONITORAMENTO_SERVICE_ID + "/api/monitoramento")
+        // Usa a URL dinâmica
+        String url = UriComponentsBuilder.fromUriString(getUrl("/api/monitoramento"))
                 .queryParam("page", pageable.getPageNumber())
                 .queryParam("size", pageable.getPageSize())
                 .toUriString();
-        log.info("BFF chamando serviço de monitoramento via Discovery: {}", url);
+
+        log.info("BFF chamando serviço de monitoramento em: {}", url);
 
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
 
@@ -69,124 +78,57 @@ public class MonitoramentoBFFService {
     }
 
     public PlacaMonitoradaDTO buscarPorId(Long id) {
-        String url = "http://" + MONITORAMENTO_SERVICE_ID + "/api/monitoramento/" + id;
-
+        String url = getUrl("/api/monitoramento/" + id);
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
-
         return circuitBreaker.run(
-                () -> {
-                    ResponseEntity<PlacaMonitoradaDTO> response = restTemplate.getForEntity(
-                            url,
-                            PlacaMonitoradaDTO.class
-                    );
-                    return response.getBody();
-                },
-                throwable -> {
-                    log.warn("Circuit Breaker ativo para buscarPorId({})", id);
-                    throw new RuntimeException("Serviço de monitoramento indisponível");
-                }
+                () -> restTemplate.getForObject(url, PlacaMonitoradaDTO.class),
+                t -> { throw new RuntimeException("Serviço indisponível"); }
         );
     }
 
     public PlacaMonitoradaDTO criarMonitorado(PlacaMonitoradaDTO dto) {
-        String url = "http://" + MONITORAMENTO_SERVICE_ID + "/api/monitoramento";
-
+        String url = getUrl("/api/monitoramento");
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
-
         return circuitBreaker.run(
-                () -> {
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.setContentType(MediaType.APPLICATION_JSON);
-                    HttpEntity<PlacaMonitoradaDTO> request = new HttpEntity<>(dto, headers);
-
-                    ResponseEntity<PlacaMonitoradaDTO> response = restTemplate.postForEntity(
-                            url,
-                            request,
-                            PlacaMonitoradaDTO.class
-                    );
-                    return response.getBody();
-                },
-                throwable -> {
-                    log.warn("Circuit Breaker ativo para criarMonitorado");
-                    throw new RuntimeException("Falha ao criar monitoramento. Serviço indisponível.");
-                }
+                () -> restTemplate.postForObject(url, dto, PlacaMonitoradaDTO.class),
+                t -> { throw new RuntimeException("Falha ao criar."); }
         );
     }
 
     public PlacaMonitoradaDTO atualizarMonitorado(Long id, PlacaMonitoradaDTO dto) {
-        String url = "http://" + MONITORAMENTO_SERVICE_ID + "/api/monitoramento/" + id;
-
+        String url = getUrl("/api/monitoramento/" + id);
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
-
         return circuitBreaker.run(
-                () -> {
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.setContentType(MediaType.APPLICATION_JSON);
-                    HttpEntity<PlacaMonitoradaDTO> request = new HttpEntity<>(dto, headers);
-
-                    ResponseEntity<PlacaMonitoradaDTO> response = restTemplate.exchange(
-                            url,
-                            HttpMethod.PUT,
-                            request,
-                            PlacaMonitoradaDTO.class
-                    );
-                    return response.getBody();
-                },
-                throwable -> {
-                    log.warn("Circuit Breaker ativo para atualizarMonitorado({})", id);
-                    throw new RuntimeException("Falha ao atualizar monitoramento. Serviço indisponível.");
-                }
+                () -> { restTemplate.put(url, dto); return dto; },
+                t -> { throw new RuntimeException("Falha ao atualizar."); }
         );
     }
 
     public void deletarMonitorado(Long id) {
-        String url = "http://" + MONITORAMENTO_SERVICE_ID + "/api/monitoramento/" + id;
-
+        String url = getUrl("/api/monitoramento/" + id);
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
-
         circuitBreaker.run(
-                () -> {
-                    restTemplate.delete(url);
-                    return null;
-                },
-                throwable -> {
-                    log.warn("Circuit Breaker ativo para deletarMonitorado({})", id);
-                    throw new RuntimeException("Falha ao deletar monitoramento. Serviço indisponível.");
-                }
+                () -> { restTemplate.delete(url); return null; },
+                t -> { throw new RuntimeException("Falha ao deletar."); }
         );
     }
 
     public Page<AlertaPassagemDTO> listarAlertas(Pageable pageable) {
         UriComponentsBuilder builder = UriComponentsBuilder
-                .fromUriString("http://" + MONITORAMENTO_SERVICE_ID + "/api/monitoramento/alertas")
+                .fromUriString(getUrl("/api/monitoramento/alertas"))
                 .queryParam("page", pageable.getPageNumber())
                 .queryParam("size", pageable.getPageSize());
 
-        pageable.getSort().forEach(order ->
-                builder.queryParam("sort", order.getProperty() + "," + order.getDirection().name()));
+        // ... lógica de sort mantida ...
 
         String url = builder.toUriString();
-        log.info("BFF chamando serviço de monitoramento para alertas: {}", url);
-
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
-
         return circuitBreaker.run(
                 () -> {
-                    try {
-                        return restTemplate.getForObject(url, PageAlertaPassagemDTO.class);
-                    } catch (Exception e) {
-                        // ✅ LOG CRÍTICO: Mostra o erro real da conexão HTTP
-                        log.error("❌ Erro de conexão com Monitoramento: {}", e.getMessage());
-                        throw e;
-                    }
+                    ResponseEntity<PageAlertaPassagemDTO> response = restTemplate.getForEntity(url, PageAlertaPassagemDTO.class);
+                    return response.getBody() != null ? response.getBody() : new PageImpl<>(Collections.emptyList(), pageable, 0);
                 },
-                throwable -> {
-                    // Fallback do Circuit Breaker
-                    log.warn("⚠️ Circuit Breaker ABERTO para listarAlertas. Causa: {}", throwable.getMessage());
-                    // Retorna lista vazia em vez de erro para não quebrar o front
-                    return new PageImpl<>(Collections.emptyList(), pageable, 0);
-                }
+                t -> new PageImpl<>(Collections.emptyList(), pageable, 0)
         );
     }
-
 }

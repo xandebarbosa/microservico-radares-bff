@@ -64,7 +64,7 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
             return true;
 
         } catch (JwtException ex) {
-            log.error("❌ [Handshake] Erro na validação do token: {}", ex.getMessage());
+            log.error("Erro no handshake (ignorado para permitir conexão): {}", ex.getMessage());
             //System.err.println("❌ Token inválido no handshake: " + ex.getMessage());
             // ✅ PERMITE handshake mesmo com token inválido
             // A validação real acontece no WebSocketAuthInterceptor

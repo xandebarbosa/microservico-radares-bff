@@ -16,6 +16,8 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtDecoders;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.web.BearerTokenResolver;
+import org.springframework.security.oauth2.server.resource.web.DefaultBearerTokenResolver;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.web.cors.CorsConfiguration;
@@ -31,10 +33,6 @@ import java.util.List;
 @EnableMethodSecurity // (2) Necessário para @PreAuthorize nos controllers
 public class SecurityConfig {
 
-    @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}")
-    private String issuerUri;
-
-    // Injetamos a URL das chaves (JWK) em vez do Issuer
     @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}")
     private String jwkSetUri;
 
@@ -44,49 +42,35 @@ public class SecurityConfig {
         this.keycloakRoleConverter = keycloakRoleConverter;
     }
 
-    /**
-     * ✅ CORREÇÃO FINAL WEBSOCKET:
-     * Diz ao Spring Security para IGNORAR totalmente estas rotas.
-     * O filtro de CORS (configurado abaixo) ainda rodará porque tem prioridade máxima,
-     * mas nenhum filtro de segurança (autenticação) será executado.
-     */
     @Bean
-    public WebSecurityCustomizer webSecurityCustomizer() {
-        return (web) -> web.ignoring()
-                .requestMatchers("/api/ws/**");
-    }
-
-    @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception { // (3) Usa HttpSecurity
-
-        // Converte Jwt -> GrantedAuthority
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         JwtAuthenticationConverter jwtConverter = new JwtAuthenticationConverter();
         jwtConverter.setJwtGrantedAuthoritiesConverter(keycloakRoleConverter);
 
         http
-                // CRÍTICO: Desabilita CSRF (necessário para APIs REST e WebSocket)
-                .csrf(csrf -> csrf.disable()) // WebSocket + REST → CSRF deve ser desabilitado
-                // CRÍTICO: Habilita CORS com configuração personalizada
-                //.cors(cors -> cors.configurationSource(corsConfigurationSource()))
-                // Configura sessão stateless
+                .csrf(csrf -> csrf.disable())
+                // Desabilita o CORS nativo do Spring Security para usar nosso Filtro de Alta Prioridade
+                .cors(cors -> cors.disable())
+
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                // CRÍTICO: Configuração de autorização
                 .authorizeHttpRequests(authorize -> authorize
-                        // Libera preflight requests (OPTIONS) para evitar erros de CORS 403
+                        // ✅ Permite Preflight (OPTIONS)
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                        // 🔥 PERMITIR completamente endpoints WebSocket (SEM AUTENTICAÇÃO)
-                        //.requestMatchers("/api/ws/**").permitAll()
-                        // Libera endpoints de health check
+
+                        // ✅ Permite Handshake do WebSocket (SockJS)
+                        // A autenticação real será feita no canal STOMP via interceptor
+                        .requestMatchers("/api/ws/**").permitAll()
+
                         .requestMatchers("/actuator/**", "/health").permitAll()
-                        // Protege todas as outras rotas da API
+
+                        // Protege todas as APIs REST
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().denyAll()
                 )
-                // Configura OAuth2 Resource Server com JWT
                 .oauth2ResourceServer(oauth2 -> oauth2
-                        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter)) // (6) Usa o conversor direto
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter))
                 )
-                // 5. ISSO CORRIGE O ERRO DE CORS FALSO NO NAVEGADOR EM CASO DE 401/403
+                // Garante que erros 401 tenham headers CORS
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
                 );
@@ -95,10 +79,7 @@ public class SecurityConfig {
     }
 
     /**
-     * CORREÇÃO DEFINITIVA DE CORS:
-     * Registra o filtro com prioridade máxima (Ordered.HIGHEST_PRECEDENCE).
-     * Isso garante que ele rode antes do Spring Security e do Spring MVC,
-     * aplicando os headers apenas uma vez.
+     * Filtro de CORS com Prioridade Máxima (Roda antes da segurança)
      */
     @Bean
     public FilterRegistrationBean<CorsFilter> corsFilter() {
@@ -106,24 +87,15 @@ public class SecurityConfig {
         CorsConfiguration config = new CorsConfiguration();
 
         config.setAllowCredentials(true);
-
-        // Configure suas origens permitidas aqui
         config.setAllowedOriginPatterns(Arrays.asList(
                 "http://localhost:3000",
                 "http://localhost:3009",
-                "http://192.168.*.*:[*]", // Suporte para IPs de rede
+                "http://192.168.*.*:[*]", // Permite rede local
                 "*"
         ));
 
-        config.setAllowedHeaders(Arrays.asList(
-                "Origin", "Content-Type", "Accept", "Authorization",
-                "X-Requested-With", "Access-Control-Request-Method",
-                "Access-Control-Request-Headers", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"
-        ));
-
+        config.setAllowedHeaders(Arrays.asList("*"));
         config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-
-        // Expõe o header Authorization para o frontend ler (se necessário)
         config.setExposedHeaders(List.of("Authorization"));
 
         source.registerCorsConfiguration("/**", config);
@@ -135,10 +107,6 @@ public class SecurityConfig {
 
     @Bean
     public JwtDecoder jwtDecoder() {
-        //return JwtDecoders.fromIssuerLocation(this.issuerUri);
-        // REFATORAÇÃO: Usa NimbusJwtDecoder com a URL JWK Set diretamente.
-        // Isso evita a chamada de "Discovery" no issuer-uri que estava dando timeout,
-        // e usa a rota interna (host.docker.internal) para baixar as chaves.
         return NimbusJwtDecoder.withJwkSetUri(this.jwkSetUri).build();
     }
 }
