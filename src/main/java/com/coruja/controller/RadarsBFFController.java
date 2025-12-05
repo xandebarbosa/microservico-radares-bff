@@ -22,7 +22,7 @@ import java.time.LocalTime;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/radares")
+@RequestMapping("/radares")
 @RequiredArgsConstructor
 @Slf4j
 public class RadarsBFFController {

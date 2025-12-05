@@ -17,7 +17,7 @@ import java.util.Map;
  * Controller para busca de logs no Elasticsearch.
  */
 @RestController
-@RequestMapping("/api/logs")
+@RequestMapping("/logs")
 public class LogController {
     private final LogService logService;
 

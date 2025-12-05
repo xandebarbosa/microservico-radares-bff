@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.http.server.ServletServerHttpRequest;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -37,39 +38,29 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
 
     @Override
     public boolean beforeHandshake(ServerHttpRequest request,
-                                   org.springframework.http.server.ServerHttpResponse response,
+                                   ServerHttpResponse response,
                                    WebSocketHandler wsHandler,
                                    Map<String, Object> attributes) throws Exception {
 
-        log.info("🤝 [Handshake] Iniciando conexão em: {}", request.getURI());
-        // extrai token: query param ou header
-        String token = extractToken(request);
+        // Verifica se é uma requisição Servlet (MVC)
+        if (request instanceof ServletServerHttpRequest servletRequest) {
+            HttpServletRequest httpServletRequest = servletRequest.getServletRequest();
+            String token = httpServletRequest.getParameter("access_token");
 
-        if (token == null || token.isBlank()) {
-            log.info("⚠️ [Handshake] Sem token. Permitindo conexão para validar no STOMP.");
-            // System.out.println("⚠️ Handshake sem token - permitindo conexão");
-            // ✅ PERMITE handshake sem token (autenticação será feita no CONNECT)
-            return true;
+            if (token != null && !token.isBlank()) {
+                try {
+                    Jwt jwt = jwtDecoder.decode(token);
+                    Principal principal = new StompPrincipal(jwt.getSubject());
+                    attributes.put("stompPrincipal", principal);
+                    return true;
+                } catch (Exception e) {
+                    log.error("Erro ao validar token no handshake: {}", e.getMessage());
+                    // Retorna true para permitir conexão anônima se falhar, ou false para bloquear
+                    return true;
+                }
+            }
         }
-        try {
-            Jwt jwt = jwtDecoder.decode(token);
-            String subject = jwt.getSubject();
-
-            StompPrincipal principal = new StompPrincipal(subject);
-            attributes.put("stompPrincipal", principal);
-            attributes.put("jwtClaims", jwt.getClaims());
-
-            log.info("✅ [Handshake] Token válido. Usuário: {}", subject);
-            //System.out.println("✅ Handshake autenticado para: " + subject);
-            return true;
-
-        } catch (JwtException ex) {
-            log.error("Erro no handshake (ignorado para permitir conexão): {}", ex.getMessage());
-            //System.err.println("❌ Token inválido no handshake: " + ex.getMessage());
-            // ✅ PERMITE handshake mesmo com token inválido
-            // A validação real acontece no WebSocketAuthInterceptor
-            return true;
-        }
+        return true;
     }
 
     @Override
@@ -117,6 +108,6 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
         private final String name;
         public StompPrincipal(String name) { this.name = name; }
         @Override public String getName() { return this.name; }
-        @Override public String toString() { return "StompPrincipal[" + name + "]"; }
+        //@Override public String toString() { return "StompPrincipal[" + name + "]"; }
     }
 }
