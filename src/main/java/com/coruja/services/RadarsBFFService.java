@@ -59,10 +59,10 @@ public class RadarsBFFService {
         log.info("Inicializando mapa de URLs dos serviços de radares...");
         // Mapeie para os NOMES DE SERVIÇO (spring.application.name)
         // Por padrão, o Eureka registra os nomes em MAIÚSCULAS.
-        serviceUrlMap.put("cart", "MICROSERVICO-RADAR-CART");
-        serviceUrlMap.put("eixo", "MICROSERVICO-RADAR-EIXO");
-        serviceUrlMap.put("entrevias", "MICROSERVICO-RADAR-ENTREVIAS");
-        serviceUrlMap.put("rondon", "MICROSSERVICO-RADAR-RONDON");
+        serviceUrlMap.put("cart", "MICROSERVICO-RADARES-CART");
+        //serviceUrlMap.put("eixo", "MICROSERVICO-RADARES-EIXO");
+        //serviceUrlMap.put("entrevias", "MICROSERVICO-RADARES-ENTREVIAS");
+        //serviceUrlMap.put("rondon", "MICROSERVICO-RADARES-RONDON");
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
 
@@ -109,7 +109,7 @@ public class RadarsBFFService {
                         ),
                         executorService
                 ))
-                .collect(Collectors.toList());
+                .toList();
 
         // Aguarda todas as respostas
         List<RadarPageDTO> pages = futures.stream()
@@ -211,26 +211,7 @@ public class RadarsBFFService {
 
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("filterOptions");
 
-        return circuitBreaker.run(
-                () -> {
-                    try {
-                        ResponseEntity<FilterOptionsDTO> response = restTemplate.getForEntity(
-                                url,
-                                FilterOptionsDTO.class
-                        );
-                        return response.getBody() != null
-                                ? response.getBody()
-                                : new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
-                    } catch (Exception e) {
-                        log.error("Erro ao buscar opções de filtro: {}", e.getMessage());
-                        throw e;
-                    }
-                },
-                throwable -> {
-                    log.warn("Circuit Breaker ativo para filtros de {}", nomeConcessionaria);
-                    return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
-                }
-        );
+        return circuitBreaker.run(() -> restTemplate.getForObject(url, FilterOptionsDTO.class), t -> new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of()));
     }
 
     /**
@@ -282,9 +263,19 @@ public class RadarsBFFService {
         UriComponentsBuilder uriBuilder = UriComponentsBuilder
                 .fromUriString("http://" + baseUrl + "/radares/filtros")
                 .queryParam("page", pageable.getPageNumber())
-                .queryParam("size", pageable.getPageSize())
-                .queryParam("sort", "data,desc")
-                .queryParam("sort", "hora,desc");
+                .queryParam("size", pageable.getPageSize());
+
+        // 1. LÓGICA DE ORDENAÇÃO CORRIGIDA
+        if (pageable.getSort().isSorted()) {
+            // Se o frontend mandou sort, repassa exatamente como veio
+            pageable.getSort().forEach(order -> {
+                uriBuilder.queryParam("sort", order.getProperty() + "," + order.getDirection());
+            });
+        } else {
+            // Se não mandou, força o padrão DESC para pegar os mais recentes
+            uriBuilder.queryParam("sort", "data,desc");
+            uriBuilder.queryParam("sort", "hora,desc");
+        }
 
         if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
         if (praca != null && !praca.isBlank()) uriBuilder.queryParam("praca", praca);
@@ -296,29 +287,21 @@ public class RadarsBFFService {
         if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
 
         String urlFinal = uriBuilder.toUriString();
-        log.info("BFF chamando serviço via Service Discovery: {}", urlFinal);
+        log.info("BFF chamando serviço via Service Discovery [{}]: {}", baseUrl, urlFinal);
 
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("radaresService");
 
         return circuitBreaker.run(
                 () -> {
                     try {
-                        ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(
-                                urlFinal,
-                                RadarPageDTO.class
-                        );
-                        return response.getBody() != null
-                                ? response.getBody()
-                                : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+                        ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(urlFinal, RadarPageDTO.class);
+                        return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     } catch (Exception e) {
-                        log.error("Erro ao chamar {}: {}", urlFinal, e.getMessage());
+                        log.error("Erro chamando {}: {}", baseUrl, e.getMessage());
                         throw e;
                     }
                 },
-                throwable -> {
-                    log.warn("Circuit Breaker ativo para {}", baseUrl);
-                    return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
-                }
+                throwable -> new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0))
         );
     }
 
@@ -398,38 +381,32 @@ public class RadarsBFFService {
                 .flatMap(p -> p.getContent().stream())
                 .collect(Collectors.toList());
 
-        // Ordena por data e hora (mais recentes primeiro)
-        combinedContent.sort(Comparator
-                .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
-                .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
+        // Re-ordena em memória para garantir consistência na agregação
+        // Se o sort for complexo no futuro, essa lógica precisará ser mais dinâmica
+        if (pageable.getSort().isSorted()) {
+            // Lógica básica para respeitar o sort do pageable se possível,
+            // mas aqui forçamos o padrão esperado pelo usuário para simplificar.
+            combinedContent.sort(Comparator
+                    .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
+                    .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
+        } else {
+            combinedContent.sort(Comparator
+                    .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
+                    .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
+        }
 
-        // Calcula total de elementos
         long totalElements = pages.stream()
                 .filter(p -> p != null && p.getPage() != null)
                 .mapToLong(p -> p.getPage().getTotalElements())
                 .sum();
 
-        // Aplica paginação
         List<RadarDTO> paginatedContent = combinedContent.stream()
                 .skip((long) pageable.getPageNumber() * pageable.getPageSize())
                 .limit(pageable.getPageSize())
                 .collect(Collectors.toList());
 
-        // Calcula metadados da página
-        int totalPages = pageable.getPageSize() > 0
-                ? (int) Math.ceil((double) totalElements / pageable.getPageSize())
-                : 0;
+        int totalPages = pageable.getPageSize() > 0 ? (int) Math.ceil((double) totalElements / pageable.getPageSize()) : 0;
 
-        PageMetadata metadata = new PageMetadata(
-                pageable.getPageNumber(),
-                pageable.getPageSize(),
-                totalElements,
-                totalPages
-        );
-
-        log.info("Agregação: {} elementos totais, {} combinados, {} retornados",
-                totalElements, combinedContent.size(), paginatedContent.size());
-
-        return new RadarPageDTO(paginatedContent, metadata);
+        return new RadarPageDTO(paginatedContent, new PageMetadata(pageable.getPageNumber(), pageable.getPageSize(), totalElements, totalPages));
     }
 }
