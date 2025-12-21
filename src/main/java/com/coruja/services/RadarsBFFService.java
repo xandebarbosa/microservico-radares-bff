@@ -198,7 +198,7 @@ public class RadarsBFFService {
     /**
      * Busca as opções de filtro disponíveis para uma concessionária.
      */
-    @Cacheable(value = "radares-bff-filtros", key = "#nomeConcessionaria")
+    @Cacheable(value = "radares-bff-filtros", key = "#nomeConcessionaria", unless = "#result == null || #result.rodovias.isEmpty()")
     public FilterOptionsDTO getFilterOptionsForConcessionaria(String nomeConcessionaria) {
         String baseUrl = serviceUrlMap.get(nomeConcessionaria.toLowerCase());
         if (baseUrl == null) {
@@ -211,7 +211,29 @@ public class RadarsBFFService {
 
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("filterOptions");
 
-        return circuitBreaker.run(() -> restTemplate.getForObject(url, FilterOptionsDTO.class), t -> new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of()));
+        return circuitBreaker.run(
+                () -> {
+                    // Tenta fazer a requisição
+                    try {
+                        FilterOptionsDTO response = restTemplate.getForObject(url, FilterOptionsDTO.class);
+                        if (response == null) {
+                            log.warn("⚠️ [BFF] Resposta NULA recebida de {}", url);
+                            return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
+                        }
+                        log.info("✅ [BFF] Filtros recebidos com sucesso! Rodovias: {}", response.getRodovias().size());
+                        return response;
+                    } catch (Exception e) {
+                        log.error("🔥 [BFF] Erro ao chamar REST TEMPLATE para {}: {}", url, e.getMessage());
+                        throw e; // Relança para ativar o fallback
+                    }
+                },
+                throwable -> {
+                    // FALLBACK - Aqui descobrimos a causa
+                    log.error("❌ [CIRCUIT BREAKER] Falha ao buscar filtros de '{}'. Causa: {}", nomeConcessionaria, throwable.getMessage(), throwable);
+                    // Retorna vazio para não quebrar o frontend, mas agora SABEMOS o erro no log
+                    return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
+                }
+        );
     }
 
     /**

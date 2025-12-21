@@ -1,5 +1,6 @@
 package com.coruja.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -13,6 +14,7 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class FilterOptionsDTO {
     private List<String> rodovias;
+    @JsonAlias({"praca", "pracas"})
     private List<String> pracas;
     private List<String> kms;
     private List<String> sentidos;

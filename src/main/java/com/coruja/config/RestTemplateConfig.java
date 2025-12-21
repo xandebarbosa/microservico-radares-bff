@@ -47,8 +47,8 @@ public class RestTemplateConfig {
         // Timeout de conexão: 5 segundos
         factory.setConnectTimeout(5000);
 
-        // Timeout de leitura: 10 segundos
-        factory.setReadTimeout(10000);
+        // Timeout de leitura: 45 segundos
+        factory.setReadTimeout(45000);
 
         return factory;
     }

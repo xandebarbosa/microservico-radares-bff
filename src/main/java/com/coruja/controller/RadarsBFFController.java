@@ -11,6 +11,7 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -20,6 +21,7 @@ import reactor.core.publisher.Mono;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/radares")
@@ -123,7 +125,9 @@ public class RadarsBFFController {
     public ResponseEntity<FilterOptionsDTO> getFiltersOptions(@PathVariable String nomeConcessionaria) {
         log.info("⚙️ Buscando opções de filtro: {}", nomeConcessionaria);
         FilterOptionsDTO result = radarsBFFService.getFilterOptionsForConcessionaria(nomeConcessionaria);
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
+                .body(result);
     }
 
     /**
@@ -138,9 +142,13 @@ public class RadarsBFFController {
             @PathVariable String nomeConcessionaria,
             @RequestParam String rodovia
     ) {
-        log.info("📏 Buscando KMs para rodovia: {}", rodovia);
+        log.info("📏 Buscando KMs para rodovia: {} ({})", rodovia, nomeConcessionaria);
         List<String> result = radarsBFFService.getKmsForRodoviaByConcessionaria(nomeConcessionaria, rodovia);
-        return ResponseEntity.ok(result);
+
+        // CACHE-CONTROL: Navegador guarda por 30 minutos
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
+                .body(result);
     }
 
     /**
