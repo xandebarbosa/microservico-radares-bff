@@ -203,4 +203,26 @@ public class RadarsBFFController {
         );
         return ResponseEntity.ok(result);
     }
+
+    /**
+     * Endpoint para busca Geoespacial (Latitude/Longitude).
+     * Orquestra a chamada para todos os microserviços e agrega os resultados próximos.
+     */
+    @GetMapping("/geo-search")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<RadarPageDTO> buscarPorGeolocalizacao(
+            @RequestParam Double latitude,
+            @RequestParam Double longitude,
+            @RequestParam(required = false, defaultValue = "15000") Double raio,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicio,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFim,
+            Pageable pageable
+    ) {
+        log.info("🌍 Buscando por geolocalização: Latitude={}, Longitude={}, Raio={}m", latitude, longitude, raio);
+        RadarPageDTO result = radarsBFFService.buscarPorGeolocalizacao(
+                latitude, longitude, raio, data, horaInicio, horaFim, pageable
+        );
+        return ResponseEntity.ok(result);
+    }
 }

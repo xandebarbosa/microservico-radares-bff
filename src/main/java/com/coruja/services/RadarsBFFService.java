@@ -265,6 +265,51 @@ public class RadarsBFFService {
         }
     }
 
+    /**
+     * Orquestra a busca geoespacial em todos os microserviços.
+     */
+    public RadarPageDTO buscarPorGeolocalizacao(
+            Double latitude,
+            Double longitude,
+            Double raio,
+            LocalDate data,
+            LocalTime horaInicio,
+            LocalTime horaFim,
+            Pageable pageable
+    ) {
+        // Por padrão, a busca geoespacial varre todas as concessionárias cadastradas
+        List<String> urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
+        if (urlsParaChamar.isEmpty()) {
+            log.warn("Nenhum serviço registrado para busca geoespacial.");
+            return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+        }
+
+        // Executa chamadas paralelas para o endpoint /geo-search dos microserviços
+        List<CompletableFuture<RadarPageDTO>> futures = urlsParaChamar.stream()
+                .map(baseUrl -> CompletableFuture.supplyAsync(
+                        () -> fetchGeoPageFromMicroservice(
+                                baseUrl, latitude, longitude, raio, data, horaInicio, horaFim, pageable
+                        ),
+                        executorService
+                ))
+                .toList();
+
+        // Aguarda e coleta os resultados
+        List<RadarPageDTO> pages = futures.stream()
+                .map(future -> {
+                    try {
+                        return future.get(10, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        log.error("Erro na busca geoespacial: {}", e.getMessage());
+                        return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+                    }
+                })
+                .collect(Collectors.toList());
+
+        // Usa o mesmo método de agregação que já existe para combinar os resultados
+        return aggregatePages(pages, pageable);
+    }
+
 
     // =========================================================================
     // MÉTODOS PRIVADOS AUXILIARES
@@ -431,4 +476,54 @@ public class RadarsBFFService {
 
         return new RadarPageDTO(paginatedContent, new PageMetadata(pageable.getPageNumber(), pageable.getPageSize(), totalElements, totalPages));
     }
+
+    /**
+     * Faz a chamada REST para o endpoint /geo-search do microserviço específico.
+     */
+    private RadarPageDTO fetchGeoPageFromMicroservice(
+            String baseUrl,
+            Double lat,
+            Double lon,
+            Double raio,
+            LocalDate data,
+            LocalTime horaInicial,
+            LocalTime horaFinal,
+            Pageable pageable
+    ) {
+        // Constrói a URL para o endpoint que criamos no microservico-radares-cart
+        UriComponentsBuilder uriBuilder = UriComponentsBuilder
+                .fromUriString("http://" + baseUrl + "/radares/geo-search")
+                .queryParam("lat", lat)
+                .queryParam("lon", lon)
+                .queryParam("raio", raio)
+                .queryParam("data", data.toString())
+                .queryParam("horaInicial", horaInicial.toString())
+                .queryParam("horaFinal", horaFinal.toString())
+                .queryParam("page", pageable.getPageNumber())
+                .queryParam("size", pageable.getPageSize());
+
+        // Ordenação padrão por data/hora se não vier especificado
+        uriBuilder.queryParam("sort", "data,desc");
+        uriBuilder.queryParam("sort", "hora,desc");
+
+        String urlFinal = uriBuilder.toUriString();
+        log.info("BFF Geo-Search [{}]: {}", baseUrl, urlFinal);
+
+        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("radaresGeoService");
+
+        return circuitBreaker.run(
+                () -> {
+                    try {
+                        ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(urlFinal, RadarPageDTO.class);
+                        return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+                    } catch (Exception e) {
+                        log.error("Erro chamando GeoSearch em {}: {}", baseUrl, e.getMessage());
+                        throw e;
+                    }
+                },
+                throwable -> new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0))
+        );
+    }
+
+
 }
