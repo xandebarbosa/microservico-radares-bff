@@ -1,9 +1,6 @@
 package com.coruja.controller;
 
-import com.coruja.dto.FilterOptionsDTO;
-import com.coruja.dto.RadarDTO;
-import com.coruja.dto.RadarPageDTO;
-import com.coruja.dto.RadarPageResponse;
+import com.coruja.dto.*;
 import com.coruja.services.RadarsBFFService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -126,7 +123,7 @@ public class RadarsBFFController {
         log.info("⚙️ Buscando opções de filtro: {}", nomeConcessionaria);
         FilterOptionsDTO result = radarsBFFService.getFilterOptionsForConcessionaria(nomeConcessionaria);
         return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
+                .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
                 .body(result);
     }
 
@@ -147,7 +144,7 @@ public class RadarsBFFController {
 
         // CACHE-CONTROL: Navegador guarda por 30 minutos
         return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
+                .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
                 .body(result);
     }
 
@@ -224,5 +221,21 @@ public class RadarsBFFController {
                 latitude, longitude, raio, data, horaInicio, horaFim, pageable
         );
         return ResponseEntity.ok(result);
+    }
+
+    /**
+     * Retorna a lista completa de localizações de radares de todas as concessionárias.
+     * Orquestra a chamada para todos os microserviços e agrega os resultados próximos
+     */
+    @GetMapping("/all-locations")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<List<RadarLocationDTO>> getRadarLocations() {
+        log.info("🌍 [BFF] Buscando todas as localizações de radares para o mapa");
+        List<RadarLocationDTO> locations = radarsBFFService.getAllRadarLocations();
+
+        // Cacheia no navegador por 1 hora, já que a localização dos radares raramente muda
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
+                .body(locations);
     }
 }

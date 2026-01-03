@@ -1,40 +1,53 @@
 package com.coruja.config;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
-import org.springframework.cache.CacheManager;
+import org.springframework.boot.autoconfigure.cache.RedisCacheManagerBuilderCustomizer;
 import org.springframework.cache.annotation.EnableCaching;
-import org.springframework.cache.caffeine.CaffeineCacheManager;
-import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.cache.RedisCacheConfiguration;
+import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.RedisSerializationContext;
 
-import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 
 @Configuration
+@EnableCaching
 public class CacheConfig {
 
+    /**
+     * Configuração padrão para todos os caches:
+     * - TTL padrão de 60 minutos
+     * - Não armazena valores nulos
+     * - Serializa os objetos para JSON (legível) em vez de binário Java
+     */
     @Bean
-    public CacheManager cacheManager() {
-        CaffeineCacheManager cacheManager = new CaffeineCacheManager();
+    public RedisCacheConfiguration cacheConfiguration() {
+        return RedisCacheConfiguration.defaultCacheConfig()
+                .entryTtl(Duration.ofMinutes(60))
+                .disableCachingNullValues()
+                .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(new GenericJackson2JsonRedisSerializer()));
+    }
 
-        // Define os nomes dos caches que sua aplicação usará
-        cacheManager.setCacheNames(List.of(
-                "radares-bff-filtros",
-                "radares",
-                "radares-filtros"
-                // você pode adicionar outros nomes de cache aqui no futuro
-        ));
+    /**
+     * Customizador para definir tempos de expiração (TTL) específicos por cache.
+     */
+    @Bean
+    public RedisCacheManagerBuilderCustomizer redisCacheManagerBuilderCustomizer() {
+        return (builder) -> {
+            Map<String, RedisCacheConfiguration> configurationMap = new HashMap<>();
 
-        // Habilita o suporte a cache assíncrono, necessário para tipos reativos como Mono e Flux.
-        cacheManager.setAsyncCacheMode(true);
+            // Cache de filtros e opções (TTL curto/médio)
+            configurationMap.put("radares-bff-filtros", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofMinutes(30)));
+            configurationMap.put("opcoes-filtro-cart-v2", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofHours(1)));
+            configurationMap.put("kms-rodovia-cart-v2", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofHours(1)));
 
-        // Configuração padrão para os caches (pode ser customizada por cache)
-        cacheManager.setCaffeine(Caffeine.newBuilder()
-                .expireAfterWrite(10, TimeUnit.MINUTES) // Itens expiram 10 minutos após serem gravados
-                .maximumSize(500) // Limita o cache a um máximo de 500 entradas
-                .initialCapacity(100));
+            // --- O IMPORTANTE PARA O MAPA ---
+            // Cache dos pontos do mapa (TTL longo, pois muda raramente)
+            configurationMap.put("locais-radares-bff", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofHours(24)));
 
-        return cacheManager;
+            builder.withInitialCacheConfigurations(configurationMap);
+        };
     }
 }

@@ -36,6 +36,8 @@ public class RadarsBFFService {
     private final CircuitBreakerFactory circuitBreakerFactory;
     private final ExecutorService executorService;
 
+    // Constante para Timeout (unificado)
+    private static final long REQUEST_TIMEOUT_SECONDS = 45;
 
     // ALTERE o construtor para receber o Builder
     public RadarsBFFService(
@@ -115,9 +117,9 @@ public class RadarsBFFService {
         List<RadarPageDTO> pages = futures.stream()
                 .map(future -> {
                     try {
-                        return future.get(10, TimeUnit.SECONDS);
+                        return future.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     } catch (Exception e) {
-                        log.error("Erro ao buscar dados de radar: {}", e.getMessage());
+                        log.error("❌ Erro ao buscar dados de radar (Filtros): {}", e.toString());
                         return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     }
                 })
@@ -170,9 +172,9 @@ public class RadarsBFFService {
         List<RadarDTO> allRadars = futures.stream()
                 .map(future -> {
                     try {
-                        return future.get(30, TimeUnit.SECONDS);
+                        return future.get(60, TimeUnit.SECONDS);
                     } catch (Exception e) {
-                        log.error("Erro ao buscar todos os dados: {}", e.getMessage());
+                        log.error("Erro ao buscar todos os dados para exportação: {}",e.toString());
                         return Collections.<RadarDTO>emptyList();
                     }
                 })
@@ -229,7 +231,7 @@ public class RadarsBFFService {
                 },
                 throwable -> {
                     // FALLBACK - Aqui descobrimos a causa
-                    log.error("❌ [CIRCUIT BREAKER] Falha ao buscar filtros de '{}'. Causa: {}", nomeConcessionaria, throwable.getMessage(), throwable);
+                    log.error("❌ [CIRCUIT BREAKER] Falha ao buscar filtros de '{}'. Causa: {}", nomeConcessionaria, throwable.toString());
                     // Retorna vazio para não quebrar o frontend, mas agora SABEMOS o erro no log
                     return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
                 }
@@ -298,9 +300,9 @@ public class RadarsBFFService {
         List<RadarPageDTO> pages = futures.stream()
                 .map(future -> {
                     try {
-                        return future.get(10, TimeUnit.SECONDS);
+                        return future.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     } catch (Exception e) {
-                        log.error("Erro na busca geoespacial: {}", e.getMessage());
+                        log.error("❌ Erro na busca geoespacial: {}", e.toString());
                         return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     }
                 })
@@ -310,6 +312,43 @@ public class RadarsBFFService {
         return aggregatePages(pages, pageable);
     }
 
+    /**
+     * --- NOVO MÉTODO ---
+     * Busca a lista completa de localizações (lat/long) de TODOS os microserviços.
+     * Usado para plotar os pins no mapa do Frontend.
+     */
+    @Cacheable(value = "locais-radares-bff", unless = "#result == null || #result.isEmpty()")
+    public List<RadarLocationDTO> getAllRadarLocations() {
+        List<String> urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
+
+        if (urlsParaChamar.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        log.info("Buscando localizações de radares em {} serviços...", urlsParaChamar.size());
+
+        // Chamada paralela aos microserviços
+        List<CompletableFuture<List<RadarLocationDTO>>> futures = urlsParaChamar.stream()
+                .map(baseUrl -> CompletableFuture.supplyAsync(
+                        () -> fetchLocationsFromMicroservices(baseUrl),
+                        executorService
+                ))
+                .toList();
+
+        // Agrega os resultados
+        return futures.stream()
+                .map(future -> {
+                    try {
+                        return future.get(5, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        log.error("Erro ao buscar localizações: {}", e.getMessage());
+                        return Collections.<RadarLocationDTO>emptyList();
+                    }
+                })
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+
+    }
 
     // =========================================================================
     // MÉTODOS PRIVADOS AUXILIARES
@@ -364,11 +403,15 @@ public class RadarsBFFService {
                         ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(urlFinal, RadarPageDTO.class);
                         return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     } catch (Exception e) {
-                        log.error("Erro chamando {}: {}", baseUrl, e.getMessage());
+                        log.error("Erro chamando {}: {}", baseUrl, e.toString());
                         throw e;
                     }
                 },
-                throwable -> new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0))
+                throwable -> {
+                    // Logamos aqui para saber se foi o Circuit Breaker que abriu ou Timeout
+                    log.warn("Fallback acionado para {}: {}", baseUrl, throwable.toString());
+                    return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+                }
         );
     }
 
@@ -429,7 +472,7 @@ public class RadarsBFFService {
                     hasMorePages = false;
                 }
             } catch (Exception e) {
-                log.error("Erro ao buscar página {} de {}: {}", pageNumber, baseUrl, e.getMessage());
+                log.error("Erro ao buscar página {} de {}: {}", pageNumber, baseUrl, e.toString());
                 hasMorePages = false;
             }
         }
@@ -442,13 +485,13 @@ public class RadarsBFFService {
      * Agrega múltiplas páginas de diferentes serviços em uma única página.
      */
     private RadarPageDTO aggregatePages(List<RadarPageDTO> pages, Pageable pageable) {
-        // Combina todo o conteúdo
+        // 1. Combina o conteúdo de todas as páginas recebidas (caso haja múltiplos serviços)
         List<RadarDTO> combinedContent = pages.stream()
                 .filter(p -> p != null && p.getContent() != null)
                 .flatMap(p -> p.getContent().stream())
                 .collect(Collectors.toList());
 
-        // Re-ordena em memória para garantir consistência na agregação
+        // 2. Ordena em memória (importante se vier de múltiplos serviços)
         // Se o sort for complexo no futuro, essa lógica precisará ser mais dinâmica
         if (pageable.getSort().isSorted()) {
             // Lógica básica para respeitar o sort do pageable se possível,
@@ -468,7 +511,7 @@ public class RadarsBFFService {
                 .sum();
 
         List<RadarDTO> paginatedContent = combinedContent.stream()
-                .skip((long) pageable.getPageNumber() * pageable.getPageSize())
+                //.skip((long) pageable.getPageNumber() * pageable.getPageSize())
                 .limit(pageable.getPageSize())
                 .collect(Collectors.toList());
 
@@ -482,23 +525,23 @@ public class RadarsBFFService {
      */
     private RadarPageDTO fetchGeoPageFromMicroservice(
             String baseUrl,
-            Double lat,
-            Double lon,
+            Double latitude,
+            Double longitude,
             Double raio,
             LocalDate data,
-            LocalTime horaInicial,
-            LocalTime horaFinal,
+            LocalTime horaInicio,
+            LocalTime horaFim,
             Pageable pageable
     ) {
         // Constrói a URL para o endpoint que criamos no microservico-radares-cart
         UriComponentsBuilder uriBuilder = UriComponentsBuilder
                 .fromUriString("http://" + baseUrl + "/radares/geo-search")
-                .queryParam("lat", lat)
-                .queryParam("lon", lon)
+                .queryParam("latitude", latitude)
+                .queryParam("longitude", longitude)
                 .queryParam("raio", raio)
                 .queryParam("data", data.toString())
-                .queryParam("horaInicial", horaInicial.toString())
-                .queryParam("horaFinal", horaFinal.toString())
+                .queryParam("horaInicio", horaInicio.toString())
+                .queryParam("horaFim", horaFim.toString())
                 .queryParam("page", pageable.getPageNumber())
                 .queryParam("size", pageable.getPageSize());
 
@@ -517,13 +560,40 @@ public class RadarsBFFService {
                         ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(urlFinal, RadarPageDTO.class);
                         return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     } catch (Exception e) {
-                        log.error("Erro chamando GeoSearch em {}: {}", baseUrl, e.getMessage());
+                        log.error("Erro chamando GeoSearch em {}: {}", baseUrl, e.toString());
                         throw e;
                     }
                 },
-                throwable -> new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0))
+                throwable -> {
+                    log.warn("Fallback GeoSearch para {}: {}", baseUrl, throwable.toString());
+                    return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+                }
         );
     }
 
+    private List<RadarLocationDTO> fetchLocationsFromMicroservices(String baseUrl) {
+        String url = "http://" + baseUrl + "/radares/all-locations";
+        log.info("BFF chamando locations: {}", url);
+
+        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("locationsService");
+
+        return circuitBreaker.run(
+                () -> {
+                    try {
+                        ResponseEntity<List<RadarLocationDTO>> response = restTemplate.exchange(
+                                url,
+                                HttpMethod.GET,
+                                null,
+                                new ParameterizedTypeReference<List<RadarLocationDTO>>() {}
+                        );
+                        return response.getBody() != null ? response.getBody() : Collections.emptyList();
+                    } catch (Exception e) {
+                        log.error("Falha ao buscar locations de {}: {}", baseUrl, e.getMessage());
+                        throw e;
+                    }
+                },
+                throwable -> Collections.emptyList() //Fallback retorna lista vazia
+        );
+    }
 
 }
