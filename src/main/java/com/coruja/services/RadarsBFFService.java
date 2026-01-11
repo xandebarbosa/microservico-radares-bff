@@ -350,6 +350,57 @@ public class RadarsBFFService {
 
     }
 
+    /**
+     * --- NOVO MÉTODO ---
+     * Busca TODOS os registros que correspondem a um filtro GEO, para exportação.
+     */
+    public List<RadarDTO> buscarTodosPorGeolocalizacaoParaExportacao(
+            Double latitude,
+            Double longitude,
+            Double raio,
+            LocalDate data,
+            LocalTime horaInicio,
+            LocalTime horaFim
+    ) {
+        // Para exportação geo, assume-se busca em todas as concessionárias
+        List<String> urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
+
+        if (urlsParaChamar.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Busca todas as páginas de todos os serviços em paralelo
+        List<CompletableFuture<List<RadarDTO>>> futures = urlsParaChamar.stream()
+                .map(baseUrl -> CompletableFuture.supplyAsync(
+                        () -> fetchAllGeoPagesFromMicroservice(
+                                baseUrl, latitude, longitude, raio, data, horaInicio, horaFim
+                        ),
+                        executorService
+                ))
+                .collect(Collectors.toList());
+
+        // Combina todos os resultados
+        List<RadarDTO> allRadars = futures.stream()
+                .map(future -> {
+                    try {
+                        return future.get(60, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        log.error("Erro ao buscar dados geo para exportação: {}", e.toString());
+                        return Collections.<RadarDTO>emptyList();
+                    }
+                })
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+
+        // Ordena por data e hora (mais recentes primeiro)
+        allRadars.sort(Comparator
+                .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
+
+        log.info("Exportação GEO finalizada. Total de registros: {}", allRadars.size());
+        return allRadars;
+    }
+
     // =========================================================================
     // MÉTODOS PRIVADOS AUXILIARES
     // =========================================================================
@@ -478,6 +529,68 @@ public class RadarsBFFService {
         }
 
         log.info("Buscadas {} páginas de {} com {} registros", pageNumber, baseUrl, allRadars.size());
+        return allRadars;
+    }
+
+    /**
+     * --- NOVO MÉTODO AUXILIAR ---
+     * Itera sobre todas as páginas do endpoint /geo-search de um microserviço.
+     */
+    private List<RadarDTO> fetchAllGeoPagesFromMicroservice(
+            String baseUrl,
+            Double latitude,
+            Double longitude,
+            Double raio,
+            LocalDate data,
+            LocalTime horaInicio,
+            LocalTime horaFim
+    ) {
+        List<RadarDTO> allRadars = new ArrayList<>();
+        int pageNumber = 0;
+        final int pageSize = 1000;
+        boolean hasMorePages = true;
+
+        while (hasMorePages) {
+            UriComponentsBuilder uriBuilder = UriComponentsBuilder
+                    .fromUriString("http://" + baseUrl + "/radares/geo-search")
+                    .queryParam("latitude", latitude)
+                    .queryParam("longitude", longitude)
+                    .queryParam("raio", raio)
+                    .queryParam("data", data.toString())
+                    .queryParam("horaInicio", horaInicio.toString())
+                    .queryParam("horaFim", horaFim.toString())
+                    .queryParam("page", pageNumber)
+                    .queryParam("size", pageSize)
+                    .queryParam("sort", "data,desc")
+                    .queryParam("sort", "hora,desc");
+
+            try {
+                // Tenta buscar a página
+                ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(
+                        uriBuilder.toUriString(),
+                        RadarPageDTO.class
+                );
+
+                RadarPageDTO page = response.getBody();
+                if (page != null && page.getContent() != null && !page.getContent().isEmpty()) {
+                    allRadars.addAll(page.getContent());
+                    pageNumber++;
+
+                    // Verifica se há mais páginas
+                    if (page.getPage() != null) {
+                        hasMorePages = pageNumber < page.getPage().getTotalPages();
+                    } else {
+                        hasMorePages = false;
+                    }
+                } else {
+                    hasMorePages = false;
+                }
+            } catch (Exception e) {
+                log.error("Erro ao buscar página GEO {} de {}: {}", pageNumber, baseUrl, e.toString());
+                hasMorePages = false;
+            }
+        }
+
         return allRadars;
     }
 

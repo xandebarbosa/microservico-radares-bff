@@ -238,4 +238,25 @@ public class RadarsBFFController {
                 .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
                 .body(locations);
     }
+
+    /**
+     * NOVO: Exporta todos os dados de uma busca por Geolocalização para Excel.
+     * Não utiliza paginação - retorna todos os resultados de uma vez.
+     */
+    @GetMapping("/geo-exportar")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<List<RadarDTO>> exportarGeoComFiltros(
+            @RequestParam Double latitude,
+            @RequestParam Double longitude,
+            @RequestParam(required = false, defaultValue = "15000") Double raio,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicio,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFim
+    ) {
+        log.info("💾 Exportando dados GEO: Lat={}, Long={}, Raio={}m", latitude, longitude, raio);
+        List<RadarDTO> result = radarsBFFService.buscarTodosPorGeolocalizacaoParaExportacao(
+                latitude, longitude, raio, data, horaInicio, horaFim
+        );
+        return ResponseEntity.ok(result);
+    }
 }
