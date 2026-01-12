@@ -3,6 +3,8 @@ package com.coruja.services;
 import com.coruja.dto.*;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
@@ -30,22 +32,34 @@ import java.util.stream.Collectors;
 @Slf4j
 public class RadarsBFFService {
 
-    private final RestTemplate restTemplate;
+    // RestTemplates injetados separadamente
+    private final RestTemplate loadBalancedRestTemplate;
+    private final RestTemplate directRestTemplate;
+
+    // Variável que decidirá qual usar em tempo de execução
+    private RestTemplate monitoramentoRestTemplate;
+
     private final RealtimeUpdateService realtimeUpdateService;
     private final Map<String, String> serviceUrlMap = new HashMap<>();
     private final CircuitBreakerFactory circuitBreakerFactory;
     private final ExecutorService executorService;
+
+    // URL do Monitoramento (pode ser via Eureka ou IP Direto)
+    @Value("${microservico.monitoramento.url:http://MICROSERVICO-MONITORAMENTO}")
+    private String monitoramentoUrl;
 
     // Constante para Timeout (unificado)
     private static final long REQUEST_TIMEOUT_SECONDS = 45;
 
     // ALTERE o construtor para receber o Builder
     public RadarsBFFService(
-            RestTemplate restTemplate,
+            RestTemplate loadBalancedRestTemplate, // Injetado pelo @Primary
+            @Qualifier("directRestTemplate") RestTemplate directRestTemplate,
             RealtimeUpdateService realtimeUpdateService,
             CircuitBreakerFactory circuitBreakerFactory
     ) {
-        this.restTemplate = restTemplate;
+        this.loadBalancedRestTemplate = loadBalancedRestTemplate;
+        this.directRestTemplate = directRestTemplate;
         this.realtimeUpdateService = realtimeUpdateService;
         this.circuitBreakerFactory = circuitBreakerFactory;
         // Thread pool para chamadas paralelas aos microserviços
@@ -53,12 +67,26 @@ public class RadarsBFFService {
     }
 
     /**
-     * NOVO: Este método é executado uma vez após a construção do serviço
+     * Este método é executado uma vez após a construção do serviço
      * para inicializar nosso mapa de serviços.
      */
     @PostConstruct
     public void init() {
         log.info("Inicializando mapa de URLs dos serviços de radares...");
+
+        // 1. Configura qual RestTemplate usar para o Monitoramento (Inteligente)
+        if (monitoramentoUrl.contains("localhost") ||
+                monitoramentoUrl.contains("host.docker.internal") ||
+                monitoramentoUrl.matches(".*:\\d+.*")) {
+
+            // Se tem cara de URL física (IP/Porta), usa o Direct
+            this.monitoramentoRestTemplate = directRestTemplate;
+            log.info("🔧 RadarsBFF: Usando conexão DIRETA para Monitoramento: {}", monitoramentoUrl);
+        } else {
+            // Se não, assume que é nome do Eureka
+            this.monitoramentoRestTemplate = loadBalancedRestTemplate;
+            log.info("☁️ RadarsBFF: Usando conexão EUREKA para Monitoramento: {}", monitoramentoUrl);
+        }
         // Mapeie para os NOMES DE SERVIÇO (spring.application.name)
         // Por padrão, o Eureka registra os nomes em MAIÚSCULAS.
         serviceUrlMap.put("cart", "MICROSERVICO-RADARES-CART");
@@ -66,6 +94,12 @@ public class RadarsBFFService {
         //serviceUrlMap.put("entrevias", "MICROSERVICO-RADARES-ENTREVIAS");
         //serviceUrlMap.put("rondon", "MICROSERVICO-RADARES-RONDON");
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
+    }
+
+    private String getMonitoramentoUrl(String path) {
+        String base = monitoramentoUrl.endsWith("/") ? monitoramentoUrl.substring(0, monitoramentoUrl.length() - 1) : monitoramentoUrl;
+        String endpoint = path.startsWith("/") ? path : "/" + path;
+        return base + endpoint;
     }
 
     /**
@@ -191,10 +225,46 @@ public class RadarsBFFService {
     }
 
     /**
-     * Retorna os últimos radares processados (do cache em memória).
+     * Retorna os últimos radares processados.
+     * Tenta buscar do Cache em Memória (RabbitMQ) primeiro.
+     * Se estiver vazio (ex: após restart), busca do Banco de Dados via API Monitoramento.
      */
     public List<RadarDTO> getUltimosRadaresProcessados() {
-        return new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
+        // 1. Tenta pegar do cache em tempo real (dados chegando agora)
+        List<RadarDTO> fromMemory = new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
+
+        if (!fromMemory.isEmpty()) {
+            return fromMemory;
+        }
+
+        // 2. Se a memória estiver vazia, busca os últimos do histórico no Banco de Dados
+        log.info("Cache de memória vazio. Buscando últimos registros no Banco de Dados...");
+        return fetchUltimosFromDatabase();
+    }
+
+    private List<RadarDTO> fetchUltimosFromDatabase() {
+        // Endpoint que criamos/sugerimos no MonitoramentoController
+        String url = getMonitoramentoUrl("/api/monitoramento/ultimos");
+
+        try {
+            // Usa o 'currentRestTemplate' para garantir a conexão correta (IP ou Eureka)
+            ResponseEntity<List<RadarDTO>> response = monitoramentoRestTemplate.exchange(
+                    url,
+                    HttpMethod.GET,
+                    null,
+                    new ParameterizedTypeReference<List<RadarDTO>>() {}
+            );
+
+            List<RadarDTO> result = response.getBody();
+            if (result != null) {
+                log.info("Recuperados {} registros do histórico.", result.size());
+                return result;
+            }
+        } catch (Exception e) {
+            log.error("Falha ao buscar histórico de radares no Monitoramento: {}", e.getMessage());
+        }
+
+        return Collections.emptyList();
     }
 
     /**
@@ -217,7 +287,7 @@ public class RadarsBFFService {
                 () -> {
                     // Tenta fazer a requisição
                     try {
-                        FilterOptionsDTO response = restTemplate.getForObject(url, FilterOptionsDTO.class);
+                        FilterOptionsDTO response = loadBalancedRestTemplate.getForObject(url, FilterOptionsDTO.class);
                         if (response == null) {
                             log.warn("⚠️ [BFF] Resposta NULA recebida de {}", url);
                             return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
@@ -254,7 +324,7 @@ public class RadarsBFFService {
         log.info("BFF buscando KMs por rodovia em: {}", url);
 
         try {
-            ResponseEntity<List<String>> response = restTemplate.exchange(
+            ResponseEntity<List<String>> response = loadBalancedRestTemplate.exchange(
                     url,
                     HttpMethod.GET,
                     null,
@@ -451,7 +521,7 @@ public class RadarsBFFService {
         return circuitBreaker.run(
                 () -> {
                     try {
-                        ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(urlFinal, RadarPageDTO.class);
+                        ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(urlFinal, RadarPageDTO.class);
                         return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     } catch (Exception e) {
                         log.error("Erro chamando {}: {}", baseUrl, e.toString());
@@ -503,7 +573,7 @@ public class RadarsBFFService {
             if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
 
             try {
-                ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(
+                ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(
                         uriBuilder.toUriString(),
                         RadarPageDTO.class
                 );
@@ -566,7 +636,7 @@ public class RadarsBFFService {
 
             try {
                 // Tenta buscar a página
-                ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(
+                ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(
                         uriBuilder.toUriString(),
                         RadarPageDTO.class
                 );
@@ -670,7 +740,7 @@ public class RadarsBFFService {
         return circuitBreaker.run(
                 () -> {
                     try {
-                        ResponseEntity<RadarPageDTO> response = restTemplate.getForEntity(urlFinal, RadarPageDTO.class);
+                        ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(urlFinal, RadarPageDTO.class);
                         return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
                     } catch (Exception e) {
                         log.error("Erro chamando GeoSearch em {}: {}", baseUrl, e.toString());
@@ -693,7 +763,7 @@ public class RadarsBFFService {
         return circuitBreaker.run(
                 () -> {
                     try {
-                        ResponseEntity<List<RadarLocationDTO>> response = restTemplate.exchange(
+                        ResponseEntity<List<RadarLocationDTO>> response = loadBalancedRestTemplate.exchange(
                                 url,
                                 HttpMethod.GET,
                                 null,

@@ -1,13 +1,13 @@
 package com.coruja.services;
 
-import com.coruja.dto.AlertaPassagemDTO;
-import com.coruja.dto.PageAlertaPassagemDTO;
-import com.coruja.dto.PagePlacaMonitoradaDTO;
-import com.coruja.dto.PlacaMonitoradaDTO;
+import com.coruja.dto.*;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
@@ -18,22 +18,51 @@ import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Mono;
 
 import java.util.Collections;
+import java.util.List;
 
 @Service
 @Slf4j
 public class MonitoramentoBFFService {
 
-    private final RestTemplate restTemplate;
+    private final RestTemplate loadBalancedRestTemplate; // Para Eureka
+    private final RestTemplate directRestTemplate;       // Para Host/IP
     private final CircuitBreakerFactory circuitBreakerFactory;
 
+    // Variável que guardará o RestTemplate correto para usar
+    private RestTemplate currentRestTemplate;
+
     // ✅ Lendo do application.properties para flexibilidade
-    @Value("${microservico.monitoramento.url:http://host.docker.internal:8089}")
+    //@Value("${microservico.monitoramento.url:http://host.docker.internal:8089}")
+    @Value("${microservico.monitoramento.url:http://MICROSERVICO-MONITORAMENTO}")
     private String monitoramentoUrl;
 
-    public MonitoramentoBFFService(RestTemplate restTemplate, CircuitBreakerFactory cbFactory) {
-        this.restTemplate = restTemplate;
+    public MonitoramentoBFFService(
+            RestTemplate restTemplate,
+            @Qualifier("directRestTemplate") RestTemplate directRestTemplate,
+            CircuitBreakerFactory cbFactory)
+    {
+        this.loadBalancedRestTemplate = restTemplate;
+        this.directRestTemplate = directRestTemplate;
         this.circuitBreakerFactory = cbFactory;
         System.out.println(">>> MONITORAMENTO URL CONFIGURADA: " + this.monitoramentoUrl);
+    }
+
+    /**
+     * Decide qual RestTemplate usar baseado na URL configurada.
+     */
+    @PostConstruct
+    public void init() {
+        // Se a URL tiver "localhost", ":" (porta) ou "host.docker", usamos conexão direta
+        if (monitoramentoUrl.contains("localhost") ||
+                monitoramentoUrl.contains("host.docker.internal") ||
+                monitoramentoUrl.matches(".*:\\d+.*")) { // regex para detectar porta
+
+            this.currentRestTemplate = directRestTemplate;
+            log.info("🔧 MODO DEV DETECTADO: Usando conexão DIRETA para Monitoramento em: {}", monitoramentoUrl);
+        } else {
+            this.currentRestTemplate = loadBalancedRestTemplate;
+            log.info("☁️ MODO CLOUD DETECTADO: Usando conexão EUREKA para Monitoramento em: {}", monitoramentoUrl);
+        }
     }
 
     // Método auxiliar para garantir formatação da URL
@@ -58,7 +87,7 @@ public class MonitoramentoBFFService {
         return circuitBreaker.run(
                 () -> {
                     try {
-                        ResponseEntity<PagePlacaMonitoradaDTO> response = restTemplate.getForEntity(
+                        ResponseEntity<PagePlacaMonitoradaDTO> response = currentRestTemplate.getForEntity(
                                 url,
                                 PagePlacaMonitoradaDTO.class
                         );
@@ -81,7 +110,7 @@ public class MonitoramentoBFFService {
         String url = getUrl("/api/monitoramento/" + id);
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
-                () -> restTemplate.getForObject(url, PlacaMonitoradaDTO.class),
+                () -> currentRestTemplate.getForObject(url, PlacaMonitoradaDTO.class),
                 t -> { throw new RuntimeException("Serviço indisponível"); }
         );
     }
@@ -90,7 +119,7 @@ public class MonitoramentoBFFService {
         String url = getUrl("/api/monitoramento");
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
-                () -> restTemplate.postForObject(url, dto, PlacaMonitoradaDTO.class),
+                () -> currentRestTemplate.postForObject(url, dto, PlacaMonitoradaDTO.class),
                 t -> { throw new RuntimeException("Falha ao criar."); }
         );
     }
@@ -99,7 +128,7 @@ public class MonitoramentoBFFService {
         String url = getUrl("/api/monitoramento/" + id);
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
-                () -> { restTemplate.put(url, dto); return dto; },
+                () -> { currentRestTemplate.put(url, dto); return dto; },
                 t -> { throw new RuntimeException("Falha ao atualizar."); }
         );
     }
@@ -108,7 +137,7 @@ public class MonitoramentoBFFService {
         String url = getUrl("/api/monitoramento/" + id);
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         circuitBreaker.run(
-                () -> { restTemplate.delete(url); return null; },
+                () -> { currentRestTemplate.delete(url); return null; },
                 t -> { throw new RuntimeException("Falha ao deletar."); }
         );
     }
@@ -125,10 +154,65 @@ public class MonitoramentoBFFService {
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
                 () -> {
-                    ResponseEntity<PageAlertaPassagemDTO> response = restTemplate.getForEntity(url, PageAlertaPassagemDTO.class);
+                    ResponseEntity<PageAlertaPassagemDTO> response = currentRestTemplate.getForEntity(url, PageAlertaPassagemDTO.class);
                     return response.getBody() != null ? response.getBody() : new PageImpl<>(Collections.emptyList(), pageable, 0);
                 },
                 t -> new PageImpl<>(Collections.emptyList(), pageable, 0)
+        );
+    }
+
+    // --- NOVOS MÉTODOS: TELEGRAM ---
+
+    /**
+     * Busca a lista de usuários do Telegram cadastrados no microsserviço.
+     */
+    public List<UsuarioTelegramDTO> listarUsuariosTelegram() {
+        String url = getUrl("/api/usuarios-telegram");
+        log.info("BFF buscando usuários do Telegram: {}", url);
+
+        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoTelegramService");
+
+        return circuitBreaker.run(
+                () -> {
+                    // Usamos exchange com ParameterizedTypeReference para mapear a Lista corretamente
+                    ResponseEntity<List<UsuarioTelegramDTO>> response = currentRestTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            null,
+                            new ParameterizedTypeReference<List<UsuarioTelegramDTO>>() {}
+                    );
+                    return response.getBody() != null ? response.getBody() : Collections.emptyList();
+                },
+                throwable -> {
+                    log.error("Falha ao buscar usuários telegram: {}", throwable.getMessage());
+                    return Collections.emptyList();
+                }
+        );
+    }
+
+    /**
+     * Aciona o endpoint de sincronização no microsserviço para buscar novas mensagens do Bot.
+     */
+    public List<UsuarioTelegramDTO> sincronizarUsuariosTelegram() {
+        String url = getUrl("/api/usuarios-telegram/sincronizar");
+        log.info("BFF solicitando sincronização do Telegram: {}", url);
+
+        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoTelegramService");
+
+        return circuitBreaker.run(
+                () -> {
+                    ResponseEntity<List<UsuarioTelegramDTO>> response = currentRestTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            null,
+                            new ParameterizedTypeReference<List<UsuarioTelegramDTO>>() {}
+                    );
+                    return response.getBody() != null ? response.getBody() : Collections.emptyList();
+                },
+                throwable -> {
+                    log.error("Falha ao sincronizar telegram: {}", throwable.getMessage());
+                    return Collections.emptyList();
+                }
         );
     }
 }
