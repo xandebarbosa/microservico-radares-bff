@@ -18,6 +18,8 @@ public class PlacaMonitoradaDTO {
     private boolean statusAtivo;
     private String observacao;
     private String interessado;
+    private String telegramChatId;
+    private String telefone;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

@@ -13,6 +13,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Mono;
@@ -111,7 +112,7 @@ public class MonitoramentoBFFService {
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
                 () -> currentRestTemplate.getForObject(url, PlacaMonitoradaDTO.class),
-                t -> { throw new RuntimeException("Serviço indisponível"); }
+                throwable -> handleException("buscar por id", throwable)
         );
     }
 
@@ -120,7 +121,7 @@ public class MonitoramentoBFFService {
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
                 () -> currentRestTemplate.postForObject(url, dto, PlacaMonitoradaDTO.class),
-                t -> { throw new RuntimeException("Falha ao criar."); }
+                throwable -> handleException("criar", throwable) // Chama o método auxiliar
         );
     }
 
@@ -129,7 +130,7 @@ public class MonitoramentoBFFService {
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         return circuitBreaker.run(
                 () -> { currentRestTemplate.put(url, dto); return dto; },
-                t -> { throw new RuntimeException("Falha ao atualizar."); }
+                throwable -> handleException("atualizar", throwable)
         );
     }
 
@@ -138,7 +139,10 @@ public class MonitoramentoBFFService {
         CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoService");
         circuitBreaker.run(
                 () -> { currentRestTemplate.delete(url); return null; },
-                t -> { throw new RuntimeException("Falha ao deletar."); }
+                throwable -> {
+                    handleException("deletar", throwable);
+                    return null;
+                }
         );
     }
 
@@ -214,5 +218,21 @@ public class MonitoramentoBFFService {
                     return Collections.emptyList();
                 }
         );
+    }
+
+    private PlacaMonitoradaDTO handleException(String action, Throwable throwable) {
+        log.error("❌ Erro ao {} monitorado: {}", action, throwable.getMessage());
+
+        // Se for um erro HTTP (ex: 400 Bad Request, 404 Not Found) vindo do microserviço
+        if (throwable instanceof HttpStatusCodeException) {
+            HttpStatusCodeException httpError = (HttpStatusCodeException) throwable;
+            log.error("Detalhes do erro API: Status={}, Body={}", httpError.getStatusCode(), httpError.getResponseBodyAsString());
+
+            // Relança a exceção para que o Controller do BFF possa retornar o status code correto (ex: 400)
+            throw httpError;
+        }
+
+        // Se for outro erro (timeout, conexão recusada), lança erro genérico
+        throw new RuntimeException("Falha ao " + action + ": " + throwable.getMessage(), throwable);
     }
 }
