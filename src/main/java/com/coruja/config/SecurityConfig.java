@@ -49,12 +49,14 @@ public class SecurityConfig {
         jwtConverter.setJwtGrantedAuthoritiesConverter(keycloakRoleConverter);
 
         http
-                .csrf(csrf -> csrf.disable())
+                .csrf(csrf -> csrf.disable()) // Desabilita CSRF (essencial para WS em APIs)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 // CORS permissivo para aceitar requisições vindas do Gateway
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/actuator/**", "/health").permitAll()
+                        // ✅ Permite o handshake do WebSocket publicamente (a autenticação via token é feita no interceptor do WS ou STOMP connect)
+                        //.requestMatchers("/ws/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .oauth2ResourceServer(oauth2 -> oauth2
