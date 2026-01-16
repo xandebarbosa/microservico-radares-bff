@@ -1,7 +1,9 @@
 package com.coruja.services;
 
 import com.coruja.config.RabbitMQConfig;
+import com.coruja.dto.AlertaPassagemDTO;
 import com.coruja.dto.RadarDTO;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,14 +24,16 @@ public class RealtimeUpdateService {
 
     // Ferramenta do Spring para enviar mensagens para os clientes WebSocket
     private final SimpMessagingTemplate messagingTemplate;
+    private final ObjectMapper objectMapper;
 
     // Mapa para armazenar o último radar de cada concessionária.
     // Usamos ConcurrentHashMap para segurança em ambientes com múltiplas threads.
     private final Map<String, RadarDTO> lastRadarByConcessionaria = new ConcurrentHashMap<>();
 
     @Autowired
-    public RealtimeUpdateService(SimpMessagingTemplate messagingTemplate) {
+    public RealtimeUpdateService(SimpMessagingTemplate messagingTemplate, ObjectMapper objectMapper) {
         this.messagingTemplate = messagingTemplate;
+        this.objectMapper = objectMapper;
     }
 
     // Este método "ouve" a fila que recebe os dados de todos os radares
@@ -140,8 +144,18 @@ public class RealtimeUpdateService {
      */
     @RabbitListener(queues = "alertas_confirmados_queue")
     public void receiveConfirmedAlert(String alertaJson) {
-        logger.info("Alerta confirmado recebido do RabbitMQ: {}", alertaJson);
-        // Retransmite para um NOVO tópico do WebSocket
-        messagingTemplate.convertAndSend("/topic/confirmed-alerts", alertaJson);
+        logger.info("📩 Alerta confirmado recebido: {}", alertaJson);
+
+        try {
+            // Converte JSON para objeto AlertaPassagemDTO
+            AlertaPassagemDTO alerta = objectMapper.readValue(alertaJson, AlertaPassagemDTO.class);
+
+            // Envia objeto serializado para o WebSocket
+            messagingTemplate.convertAndSend("/topic/confirmed-alerts", alerta);
+
+            logger.info("✅ Alerta enviado via WebSocket para placa: {}", alerta.getPlaca());
+        } catch (Exception e) {
+            logger.error("❌ Erro ao processar alerta confirmado: {}", e.getMessage());
+        }
     }
 }

@@ -13,12 +13,10 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 @EnableWebSocketMessageBroker // Habilita o broker de mensagens WebSocket
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
-    private final JwtDecoder jwtDecoder;
     private final WebSocketAuthInterceptor webSocketAuthInterceptor;
 
     @Autowired
-    public WebSocketConfig(JwtDecoder jwtDecoder, WebSocketAuthInterceptor authInterceptor) {
-        this.jwtDecoder = jwtDecoder;
+    public WebSocketConfig(WebSocketAuthInterceptor authInterceptor) {
         this.webSocketAuthInterceptor = authInterceptor;
     }
 
@@ -33,16 +31,18 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+         //✅ SIMPLIFICADO: Sem HandshakeHandler nem Interceptor
+        // A autenticação acontece APENAS no STOMP CONNECT via WebSocketAuthInterceptor
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("*")
-                .setHandshakeHandler(new CustomHandshakeHandler())
-                .addInterceptors(new JwtHandshakeInterceptor(jwtDecoder))
-                .withSockJS();
+                .setAllowedOriginPatterns("*") // Permite todas as origens (ajuste em produção)
+                .withSockJS()
+                .setHeartbeatTime(25000)      // Heartbeat a cada 25s
+                .setDisconnectDelay(5000);    // Tempo antes de considerar desconectado
     }
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
-        // ✅ Registra o interceptor de autenticação
+        // ✅ Autenticação acontece AQUI no STOMP CONNECT
         registration.interceptors(webSocketAuthInterceptor);
     }
 }

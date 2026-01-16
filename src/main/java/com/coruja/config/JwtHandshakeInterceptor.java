@@ -52,15 +52,17 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
                     Jwt jwt = jwtDecoder.decode(token);
                     Principal principal = new StompPrincipal(jwt.getSubject());
                     attributes.put("stompPrincipal", principal);
-                    return true;
+                    log.info("✅ [Handshake] Token validado para: {}", jwt.getSubject());
                 } catch (Exception e) {
-                    log.error("Erro ao validar token no handshake: {}", e.getMessage());
-                    // Retorna true para permitir conexão anônima se falhar, ou false para bloquear
-                    return true;
+                    log.warn("⚠️ [Handshake] Token inválido: {}", e.getMessage());
+                    // ✅ Permite conexão mesmo com token inválido (autenticação no CONNECT)
                 }
+            } else {
+                log.debug("⚠️ [Handshake] Nenhum token fornecido (será validado no CONNECT)");
             }
         }
-        return true;
+
+        return true; // ✅ SEMPRE permite o handshake inicial
     }
 
     @Override

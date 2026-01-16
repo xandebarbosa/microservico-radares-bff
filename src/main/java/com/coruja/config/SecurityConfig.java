@@ -8,6 +8,7 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configuration.WebSecurityCustomizer;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
@@ -33,30 +34,23 @@ public class SecurityConfig {
         this.keycloakRoleConverter = keycloakRoleConverter;
     }
 
-    // IGNORA completamente a segurança para o WebSocket.
-    // Isso evita que o Spring Security tente buscar o header Authorization.
-    @Bean
-    public WebSecurityCustomizer webSecurityCustomizer() {
-        return (web) -> web.ignoring()
-                .requestMatchers("/ws/**")
-                .requestMatchers("/api/ws/**") // Prevenção caso o strip prefix falhe
-                .requestMatchers(HttpMethod.OPTIONS, "/**");
-    }
-
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         JwtAuthenticationConverter jwtConverter = new JwtAuthenticationConverter();
         jwtConverter.setJwtGrantedAuthoritiesConverter(keycloakRoleConverter);
 
         http
-                .csrf(csrf -> csrf.disable()) // Desabilita CSRF (essencial para WS em APIs)
-                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                // CORS permissivo para aceitar requisições vindas do Gateway
+                .csrf(AbstractHttpConfigurer::disable) // ✅ Desabilita CSRF completamente
+                .sessionManagement(session ->
+                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                )
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .authorizeHttpRequests(authorize -> authorize
+                        // ✅ CRÍTICO: Libera TODOS os endpoints do WebSocket/SockJS PRIMEIRO
+                        .requestMatchers("/ws/**").permitAll()
                         .requestMatchers("/actuator/**", "/health").permitAll()
-                        // ✅ Permite o handshake do WebSocket publicamente (a autenticação via token é feita no interceptor do WS ou STOMP connect)
-                        //.requestMatchers("/ws/**").permitAll()
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        // Todos os outros endpoints exigem autenticação
                         .anyRequest().authenticated()
                 )
                 .oauth2ResourceServer(oauth2 -> oauth2
