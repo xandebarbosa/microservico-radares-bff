@@ -22,7 +22,7 @@ public class CircuitBreakerConfiguration {
     public Customizer<Resilience4JCircuitBreakerFactory> defaultCustomizer() {
         return factory -> factory.configureDefault(id -> new Resilience4JConfigBuilder(id)
                 .timeLimiterConfig(TimeLimiterConfig.custom()
-                        .timeoutDuration(Duration.ofSeconds(50))
+                        .timeoutDuration(Duration.ofSeconds(60))
                         .build())
                 .circuitBreakerConfig(CircuitBreakerConfig.custom()
                         // Threshold de falhas para abrir o circuito (50%)

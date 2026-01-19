@@ -46,6 +46,8 @@ public class SecurityConfig {
                 )
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .authorizeHttpRequests(authorize -> authorize
+                        // ✅ LIBERA O SWAGGER
+                        .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         // ✅ CRÍTICO: Libera TODOS os endpoints do WebSocket/SockJS PRIMEIRO
                         .requestMatchers("/ws/**").permitAll()
                         .requestMatchers("/actuator/**", "/health").permitAll()

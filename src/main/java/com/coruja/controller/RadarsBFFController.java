@@ -33,15 +33,38 @@ public class RadarsBFFController {
      * @param placa A placa do veículo a ser pesquisada.     *
      * @return Uma página de resultados de radares para a placa informada.
      */
+//    @GetMapping("/placa/{placa}")
+//    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+//    public ResponseEntity<RadarPageDTO> buscarPorPlaca(
+//            @PathVariable String placa,
+//            Pageable pageable
+//    ) {
+//        log.info("📍 Buscando por placa: {}", placa);
+//        RadarPageDTO result = radarsBFFService.buscarComFiltros(
+//                null, placa, null, null, null, null, null, null, null, pageable
+//        );
+//        return ResponseEntity.ok(result);
+//    }
+
+    /**
+     * Busca registros de radares por placa (Total ou Parcial).
+     * Ex: "ABC-1234" (Total) ou "ABC" (Parcial).
+     * @param placa A placa ou trecho da placa a ser pesquisada.
+     * @return Uma página de resultados de radares.
+     */
     @GetMapping("/placa/{placa}")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<RadarPageDTO> buscarPorPlaca(
             @PathVariable String placa,
             Pageable pageable
-    ) {
-        log.info("📍 Buscando por placa: {}", placa);
+    ){
+        // ✅ Refatoração: Sanitização da entrada para evitar erros de case-sensitive
+        String termoBusca = (placa != null) ? placa.trim().toUpperCase() : "";
+
+        log.info("📍 Buscando por placa (parcial ou total): {}", termoBusca);
+
         RadarPageDTO result = radarsBFFService.buscarComFiltros(
-                null, placa, null, null, null, null, null, null, null, pageable
+                null, termoBusca, null, null, null, null, null, null, null, pageable
         );
         return ResponseEntity.ok(result);
     }
