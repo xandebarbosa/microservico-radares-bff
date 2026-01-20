@@ -22,7 +22,7 @@ public class CircuitBreakerConfiguration {
     public Customizer<Resilience4JCircuitBreakerFactory> defaultCustomizer() {
         return factory -> factory.configureDefault(id -> new Resilience4JConfigBuilder(id)
                 .timeLimiterConfig(TimeLimiterConfig.custom()
-                        .timeoutDuration(Duration.ofSeconds(60))
+                        .timeoutDuration(Duration.ofSeconds(90))
                         .build())
                 .circuitBreakerConfig(CircuitBreakerConfig.custom()
                         // Threshold de falhas para abrir o circuito (50%)
@@ -32,11 +32,11 @@ public class CircuitBreakerConfiguration {
                         // Tempo que o circuito fica aberto (30s)
                         .waitDurationInOpenState(Duration.ofSeconds(30))
                         // Número de chamadas permitidas no estado half-open
-                        .permittedNumberOfCallsInHalfOpenState(3)
+                        .permittedNumberOfCallsInHalfOpenState(5)
                         // Threshold de chamadas lentas (50%)
                         .slowCallRateThreshold(50)
                         // Duração para considerar uma chamada lenta (5s)
-                        .slowCallDurationThreshold(Duration.ofSeconds(20))
+                        .slowCallDurationThreshold(Duration.ofSeconds(30))
                         .build())
                 .build());
     }

@@ -2,6 +2,7 @@ package com.coruja.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,6 +12,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -52,8 +54,8 @@ public class RestTemplateConfig {
     @Bean
     public ClientHttpRequestFactory clientHttpRequestFactory() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(5000);
-        factory.setReadTimeout(45000);
+        factory.setConnectTimeout(60000);
+        factory.setReadTimeout(90000);
         return factory;
     }
 
@@ -63,6 +65,7 @@ public class RestTemplateConfig {
         mapper.registerModule(new JavaTimeModule());
         return mapper;
     }
+
 
     /**
      * RestTemplate com Load Balancing via Eureka.
