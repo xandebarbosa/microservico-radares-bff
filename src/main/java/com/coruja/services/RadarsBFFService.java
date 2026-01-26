@@ -5,6 +5,7 @@ import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
@@ -17,7 +18,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
-import reactor.core.publisher.Mono;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -96,247 +96,177 @@ public class RadarsBFFService {
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
 
-    private String getMonitoramentoUrl(String path) {
-        String base = monitoramentoUrl.endsWith("/") ? monitoramentoUrl.substring(0, monitoramentoUrl.length() - 1) : monitoramentoUrl;
-        String endpoint = path.startsWith("/") ? path : "/" + path;
-        return base + endpoint;
+    // ==================================================================================
+    // 1. BUSCA POR PLACA (HISTÓRICO COMPLETO)
+    // ==================================================================================
+
+    public RadarPageDTO buscarPorPlaca(String placa, Pageable pageable) {
+        // Busca em todos os serviços registrados, pois o histórico pode estar em qualquer um
+        List<String> urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
+
+        if (urlsParaChamar.isEmpty()) {
+            return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
+        }
+
+        List<CompletableFuture<RadarPageDTO>> futures = urlsParaChamar.stream()
+                .map(baseUrl -> CompletableFuture.supplyAsync(
+                        () -> (RadarPageDTO) fetchPlacaFromMicroservice(baseUrl, placa, pageable),
+                        executorService
+                ))
+                .toList();
+
+        List<RadarPageDTO> pages = collectFutures(futures);
+        return aggregatePages(pages, pageable);
     }
 
-    /**
-     * Método unificado para buscar dados paginados. Filtra por concessionárias se a lista for fornecida,
-     * ou busca em todas se a lista for nula ou vazia.
-     */
-    public RadarPageDTO buscarComFiltros(
+    private Object fetchPlacaFromMicroservice(String baseUrl, String placa, Pageable pageable) {
+        // Chama o novo endpoint /busca-placa
+        UriComponentsBuilder uriBuilder = UriComponentsBuilder
+                .fromUriString("http://" + baseUrl + "/radares/busca-placa")
+                .queryParam("placa", placa)
+                .queryParam("page", pageable.getPageNumber())
+                .queryParam("size", pageable.getPageSize())
+                .queryParam("sort", "data,desc") // Força ordenação cronológica
+                .queryParam("sort", "hora,desc");
+
+        String urlFinal = uriBuilder.toUriString();
+        log.info("📡 BFF Request [{}]: {}", baseUrl, urlFinal);
+
+        // USANDO O RESTPAGE (Wrapper Genérico)
+        // Precisamos usar ParameterizedTypeReference para listas/genéricos
+        ParameterizedTypeReference<RestPage<RadarDTO>> responseType =
+                new ParameterizedTypeReference<RestPage<RadarDTO>>() {};
+
+        return executeCircuitBreakerRequest("buscaPlaca", baseUrl, urlFinal, responseType);
+    }
+
+    // ==================================================================================
+    // 2. BUSCA POR LOCAL (OPERACIONAL / FILTROS)
+    // ==================================================================================
+
+    public RadarPageDTO buscarPorLocal(
             List<String> concessionarias,
-            String placa,
-            String praca,
-            String rodovia,
-            String km,
-            String sentido,
             LocalDate data,
             LocalTime horaInicial,
             LocalTime horaFinal,
+            String rodovia,
+            String km,
+            String sentido,
             Pageable pageable
     ) {
         final List<String> urlsParaChamar;
 
+        // ✅ Lógica do modelo: Decide quais microsserviços chamar
         if (CollectionUtils.isEmpty(concessionarias)) {
             urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
-            log.info("Busca agregada em todos os {} serviços.", urlsParaChamar.size());
+            log.info("Busca por local em TODOS os {} serviços.", urlsParaChamar.size());
         } else {
             urlsParaChamar = concessionarias.stream()
                     .map(nome -> serviceUrlMap.get(nome.toLowerCase()))
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
-            log.info("Busca direcionada para as concessionárias: {}", concessionarias);
+            log.info("Busca por local direcionada para: {}", concessionarias);
         }
 
         if (urlsParaChamar.isEmpty()) {
-            log.warn("Nenhuma URL de serviço válida encontrada. Concessionárias: {}", concessionarias);
+            log.warn("Nenhuma URL válida encontrada para as concessionárias: {}", concessionarias);
             return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
         }
 
-        // Executa chamadas paralelas
+        // ✅ Execução paralela usando o método específico fetchLocalFromMicroservice
         List<CompletableFuture<RadarPageDTO>> futures = urlsParaChamar.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
-                        () -> fetchPageFromMicroservice(
-                                baseUrl, placa, praca, rodovia, km, sentido,
-                                data, horaInicial, horaFinal, pageable
+                        () -> fetchLocalFromMicroservice(
+                                baseUrl, data, horaInicial, horaFinal, rodovia, km, sentido, pageable
                         ),
                         executorService
                 ))
                 .toList();
 
-        // Aguarda todas as respostas
-        List<RadarPageDTO> pages = futures.stream()
-                .map(future -> {
-                    try {
-                        return future.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                    } catch (Exception e) {
-                        log.error("❌ Erro ao buscar dados de radar (Filtros): {}", e.toString());
-                        return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
-                    }
-                })
-                .collect(Collectors.toList());
-
+        List<RadarPageDTO> pages = collectFutures(futures);
         return aggregatePages(pages, pageable);
     }
 
-    /**
-     * Busca TODOS os registros que correspondem a um filtro, para exportação.
-     */
-    public List<RadarDTO> buscarTodosParaExportacao(
-            List<String> concessionarias,
-            String placa,
-            String praca,
-            String rodovia,
-            String km,
-            String sentido,
-            LocalDate data,
-            LocalTime horaInicial,
-            LocalTime horaFinal
+    private RadarPageDTO fetchLocalFromMicroservice(
+            String baseUrl, LocalDate data, LocalTime horaInicial, LocalTime horaFinal,
+            String rodovia, String km, String sentido, Pageable pageable
     ) {
-        final List<String> urlsParaChamar;
+        UriComponentsBuilder uriBuilder = UriComponentsBuilder
+                .fromUriString("http://" + baseUrl + "/radares/busca-local")
+                .queryParam("data", data)
+                .queryParam("page", pageable.getPageNumber())
+                .queryParam("size", pageable.getPageSize());
 
-        if (CollectionUtils.isEmpty(concessionarias)) {
-            urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
-        } else {
-            urlsParaChamar = concessionarias.stream()
-                    .map(nome -> serviceUrlMap.get(nome.toLowerCase()))
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-        }
+        if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial);
+        if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal);
+        if (rodovia != null) uriBuilder.queryParam("rodovia", rodovia);
+        if (km != null) uriBuilder.queryParam("km", km);
+        if (sentido != null) uriBuilder.queryParam("sentido", sentido);
 
-        if (urlsParaChamar.isEmpty()) {
-            return Collections.emptyList();
-        }
+        // USANDO O RESTPAGE (Wrapper Genérico)
+        // Precisamos usar ParameterizedTypeReference para listas/genéricos
+        ParameterizedTypeReference<RestPage<RadarDTO>> responseType =
+                new ParameterizedTypeReference<RestPage<RadarDTO>>() {};
 
-        // Busca todas as páginas de todos os serviços em paralelo
-        List<CompletableFuture<List<RadarDTO>>> futures = urlsParaChamar.stream()
-                .map(baseUrl -> CompletableFuture.supplyAsync(
-                        () -> fetchAllPagesFromMicroservice(
-                                baseUrl, placa, praca, rodovia, km, sentido,
-                                data, horaInicial, horaFinal
-                        ),
-                        executorService
-                ))
-                .collect(Collectors.toList()).reversed();
-
-        // Combina todos os resultados
-        List<RadarDTO> allRadars = futures.stream()
-                .map(future -> {
-                    try {
-                        return future.get(60, TimeUnit.SECONDS);
-                    } catch (Exception e) {
-                        log.error("Erro ao buscar todos os dados para exportação: {}",e.toString());
-                        return Collections.<RadarDTO>emptyList();
-                    }
-                })
-                .flatMap(List::stream)
-                .collect(Collectors.toList());
-
-        // Ordena por data e hora (mais recentes primeiro)
-        allRadars.sort(Comparator
-                .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
-                .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
-
-        log.info("Exportação finalizada. Total de registros: {}", allRadars.size());
-        return allRadars;
+        return executeCircuitBreakerRequest("buscaLocal", baseUrl, uriBuilder.toUriString(), responseType);
     }
 
-    /**
-     * Retorna os últimos radares processados.
-     * Tenta buscar do Cache em Memória (RabbitMQ) primeiro.
-     * Se estiver vazio (ex: após restart), busca do Banco de Dados via API Monitoramento.
-     */
-    public List<RadarDTO> getUltimosRadaresProcessados() {
-        // 1. Tenta pegar do cache em tempo real (dados chegando agora)
-        List<RadarDTO> fromMemory = new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
+    // ==================================================================================
+    // 3. GESTÃO DE RODOVIAS E KMs (NOVO)
+    // ==================================================================================
 
-        if (!fromMemory.isEmpty()) {
-            return fromMemory;
-        }
-
-        // 2. Se a memória estiver vazia, busca os últimos do histórico no Banco de Dados
-        log.info("Cache de memória vazio. Buscando últimos registros no Banco de Dados...");
-        return fetchUltimosFromDatabase();
+    @Cacheable(value = "lista-rodovias-bff")
+    public List<RodoviaDTO> listarRodovias() {
+        // Vamos buscar da 'cart' como fonte principal, ou agregar de todas
+        // Por simplificação, pegamos do primeiro serviço disponível ou iteramos
+        return fetchListFromAll("rodovias", RodoviaDTO.class);
     }
 
-    private List<RadarDTO> fetchUltimosFromDatabase() {
-        // Endpoint que criamos/sugerimos no MonitoramentoController
-        String url = getMonitoramentoUrl("/api/monitoramento/ultimos");
+    @CacheEvict(value = "lista-rodovias-bff", allEntries = true)
+    public RodoviaDTO salvarRodovia(RodoviaDTO dto) {
+        // Envia para o serviço CART (assumindo que ele gerencia o domínio)
+        String baseUrl = serviceUrlMap.get("cart");
+        if (baseUrl == null) throw new IllegalStateException("Serviço CART não configurado para gestão de rodovias");
 
-        try {
-            // Usa o 'currentRestTemplate' para garantir a conexão correta (IP ou Eureka)
-            ResponseEntity<List<RadarDTO>> response = monitoramentoRestTemplate.exchange(
-                    url,
-                    HttpMethod.GET,
-                    null,
-                    new ParameterizedTypeReference<List<RadarDTO>>() {}
-            );
-
-            List<RadarDTO> result = response.getBody();
-            if (result != null) {
-                log.info("Recuperados {} registros do histórico.", result.size());
-                return result;
-            }
-        } catch (Exception e) {
-            log.error("Falha ao buscar histórico de radares no Monitoramento: {}", e.getMessage());
-        }
-
-        return Collections.emptyList();
+        String url = "http://" + baseUrl + "/radares/rodovias";
+        return loadBalancedRestTemplate.postForObject(url, dto, RodoviaDTO.class);
     }
 
-    /**
-     * Busca as opções de filtro disponíveis para uma concessionária.
-     */
-    @Cacheable(value = "radares-bff-filtros", key = "#nomeConcessionaria", unless = "#result == null || #result.rodovias.isEmpty()")
-    public FilterOptionsDTO getFilterOptionsForConcessionaria(String nomeConcessionaria) {
-        String baseUrl = serviceUrlMap.get(nomeConcessionaria.toLowerCase());
-        if (baseUrl == null) {
-            log.warn("Concessionária '{}' não encontrada no mapa de serviços", nomeConcessionaria);
-            return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
-        }
-
-        String url = "http://" + baseUrl + "/radares/opcoes-filtro";
-        log.info("BFF buscando opções de filtro em: {}", url);
-
-        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("filterOptions");
-
-        return circuitBreaker.run(
-                () -> {
-                    // Tenta fazer a requisição
-                    try {
-                        FilterOptionsDTO response = loadBalancedRestTemplate.getForObject(url, FilterOptionsDTO.class);
-                        if (response == null) {
-                            log.warn("⚠️ [BFF] Resposta NULA recebida de {}", url);
-                            return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
-                        }
-                        log.info("✅ [BFF] Filtros recebidos com sucesso! Rodovias: {}", response.getRodovias().size());
-                        return response;
-                    } catch (Exception e) {
-                        log.error("🔥 [BFF] Erro ao chamar REST TEMPLATE para {}: {}", url, e.getMessage());
-                        throw e; // Relança para ativar o fallback
-                    }
-                },
-                throwable -> {
-                    // FALLBACK - Aqui descobrimos a causa
-                    log.error("❌ [CIRCUIT BREAKER] Falha ao buscar filtros de '{}'. Causa: {}", nomeConcessionaria, throwable.toString());
-                    // Retorna vazio para não quebrar o frontend, mas agora SABEMOS o erro no log
-                    return new FilterOptionsDTO(List.of(), List.of(), List.of(), List.of());
-                }
-        );
-    }
-
-    /**
-     * Busca os KMs disponíveis para uma rodovia específica.
-     */
-    public List<String> getKmsForRodoviaByConcessionaria(String nomeConcessionaria, String rodovia) {
-        String baseUrl = serviceUrlMap.get(nomeConcessionaria.toLowerCase());
-        if (baseUrl == null) {
-            return Collections.emptyList();
-        }
-
-        String url = UriComponentsBuilder.fromHttpUrl("http://" + baseUrl + "/radares/kms-por-rodovia")
-                .queryParam("rodovia", rodovia)
-                .toUriString();
-
-        log.info("BFF buscando KMs por rodovia em: {}", url);
-
-        try {
-            ResponseEntity<List<String>> response = loadBalancedRestTemplate.exchange(
-                    url,
-                    HttpMethod.GET,
-                    null,
-                    new ParameterizedTypeReference<List<String>>() {}
-            );
-            return response.getBody() != null ? response.getBody() : Collections.emptyList();
-        } catch (Exception e) {
-            log.error("Erro ao buscar KMs para rodovia '{}': {}", rodovia, e.getMessage());
-            return Collections.emptyList();
+    @CacheEvict(value = "lista-rodovias-bff", allEntries = true)
+    public void deletarRodovia(Long id) {
+        String baseUrl = serviceUrlMap.get("cart");
+        if (baseUrl != null) {
+            loadBalancedRestTemplate.delete("http://" + baseUrl + "/radares/rodovias/" + id);
         }
     }
 
+    // --- KMs ---
+
+    public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId) {
+        String baseUrl = serviceUrlMap.get("cart");
+        if (baseUrl == null) return Collections.emptyList();
+
+        String url = "http://" + baseUrl + "/radares/rodovias/" + rodoviaId + "/kms";
+        return executeCircuitBreakerListRequest("listarKms", baseUrl, url, KmRodoviaDTO.class);
+    }
+
+    public KmRodoviaDTO salvarKm(KmRodoviaDTO dto) {
+        String baseUrl = serviceUrlMap.get("cart");
+        if (baseUrl == null) throw new IllegalStateException("Serviço CART não disponível");
+
+        return loadBalancedRestTemplate.postForObject("http://" + baseUrl + "/radares/kms", dto, KmRodoviaDTO.class);
+    }
+
+    public void deletarKm(Long id) {
+        String baseUrl = serviceUrlMap.get("cart");
+        if (baseUrl != null) {
+            loadBalancedRestTemplate.delete("http://" + baseUrl + "/radares/kms/" + id);
+        }
+    }
+
+    // ==================================================================================
+    // 4. BUSCA GEOESPACIAL E MAPA
+    // ==================================================================================
     /**
      * Orquestra a busca geoespacial em todos os microserviços.
      */
@@ -471,12 +401,138 @@ public class RadarsBFFService {
         return allRadars;
     }
 
-    // =========================================================================
-    // MÉTODOS PRIVADOS AUXILIARES
-    // =========================================================================
+    // ==================================================================================
+    // UTILITÁRIOS E HELPERS
+    // ==================================================================================
 
-    private RadarPageDTO fetchPageFromMicroservice(
+    /**
+     * Executa uma requisição com Circuit Breaker genérico
+     */
+    private RadarPageDTO executeCircuitBreakerRequest(
+            String cbName,
             String baseUrl,
+            String url,
+            ParameterizedTypeReference<RestPage<RadarDTO>> responseType
+    ) {
+        CircuitBreaker cb = circuitBreakerFactory.create(cbName);
+
+        return cb.run(() -> {
+            try {
+                // Faz a chamada esperando o RestPage
+                ResponseEntity<RestPage<RadarDTO>> response = loadBalancedRestTemplate.exchange(
+                        url,
+                        HttpMethod.GET,
+                        null,
+                        responseType
+                );
+
+                RestPage<RadarDTO> page = response.getBody();
+
+                if (page == null || page.getContent().isEmpty()) {
+                    return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
+                }
+
+                // Converte o RestPage (Spring) para o seu RadarPageDTO (BFF/Front)
+                PageMetadata metadata = new PageMetadata(
+                        page.getNumber(),
+                        page.getSize(),
+                        page.getTotalElements(),
+                        page.getTotalPages()
+                );
+
+                return new RadarPageDTO(page.getContent(), metadata);
+
+            } catch (Exception e) {
+                log.error("🔥 Erro ao chamar {}: {}", url, e.getMessage());
+                throw e;
+            }
+        }, throwable -> {
+            log.warn("⚠️ Fallback para {}: {}", baseUrl, throwable.getMessage());
+            return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
+        });
+    }
+
+    /**
+     * Helper para buscar listas de todos os microsserviços e agregar
+     */
+    private <T> List<T> fetchListFromAll(String endpointSuffix, Class<T> itemType) {
+        List<String> urls = new ArrayList<>(serviceUrlMap.values());
+        if (urls.isEmpty()) return Collections.emptyList();
+
+        List<CompletableFuture<List<T>>> futures = urls.stream()
+                .map(baseUrl -> CompletableFuture.supplyAsync(() -> {
+                    String url = "http://" + baseUrl + "/radares/" + endpointSuffix;
+                    return executeCircuitBreakerListRequest("genericList", baseUrl, url, itemType);
+                }, executorService))
+                .toList();
+
+        return futures.stream()
+                .map(f -> {
+                    try { return f.get(5, TimeUnit.SECONDS); }
+                    catch (Exception e) { return Collections.<T>emptyList(); }
+                })
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Circuit breaker específico para listas (devido ao Type Erasure do Java Generics)
+     */
+    private <T> List<T> executeCircuitBreakerListRequest(String cbName, String baseUrl, String url, Class<T> itemType) {
+        CircuitBreaker cb = circuitBreakerFactory.create(cbName);
+        return cb.run(() -> {
+            ResponseEntity<List<T>> response = loadBalancedRestTemplate.exchange(
+                    url, HttpMethod.GET, null, new ParameterizedTypeReference<List<T>>() {}
+            );
+            return response.getBody() != null ? response.getBody() : Collections.emptyList();
+        }, t -> Collections.emptyList());
+    }
+
+    private List<RadarPageDTO> collectFutures(List<CompletableFuture<RadarPageDTO>> futures) {
+        return futures.stream()
+                .map(future -> {
+                    try { return future.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS); }
+                    catch (Exception e) { return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0)); }
+                })
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Agrega múltiplas páginas de diferentes serviços em uma única página.
+     */
+    private RadarPageDTO aggregatePages(List<RadarPageDTO> pages, Pageable pageable) {
+        List<RadarDTO> combined = pages.stream()
+                .filter(p -> p != null && p.getContent() != null)
+                .flatMap(p -> p.getContent().stream())
+                .sorted(Comparator.comparing(RadarDTO::getData, Comparator.reverseOrder())
+                        .thenComparing(RadarDTO::getHora, Comparator.reverseOrder()))
+                .collect(Collectors.toList());
+
+        long totalElements = pages.stream()
+                .filter(p -> p != null && p.getPage() != null)
+                .mapToLong(p -> p.getPage().getTotalElements())
+                .sum();
+
+        List<RadarDTO> paged = combined.stream()
+                .limit(pageable.getPageSize())
+                .collect(Collectors.toList());
+
+        int totalPages = pageable.getPageSize() > 0 ? (int) Math.ceil((double) totalElements / pageable.getPageSize()) : 0;
+        return new RadarPageDTO(paged, new PageMetadata(pageable.getPageNumber(), pageable.getPageSize(), totalElements, totalPages));
+    }
+
+    private String getMonitoramentoUrl(String path) {
+        String base = monitoramentoUrl.endsWith("/") ? monitoramentoUrl.substring(0, monitoramentoUrl.length() - 1) : monitoramentoUrl;
+        String endpoint = path.startsWith("/") ? path : "/" + path;
+        return base + endpoint;
+    }
+
+
+    /**
+     * Busca TODOS os registros que correspondem a um filtro, para exportação.
+     */
+    public List<RadarDTO> buscarTodosParaExportacao(
+            List<String> concessionarias,
             String placa,
             String praca,
             String rodovia,
@@ -484,57 +540,90 @@ public class RadarsBFFService {
             String sentido,
             LocalDate data,
             LocalTime horaInicial,
-            LocalTime horaFinal,
-            Pageable pageable
+            LocalTime horaFinal
     ) {
-        UriComponentsBuilder uriBuilder = UriComponentsBuilder
-                .fromUriString("http://" + baseUrl + "/radares/filtros")
-                .queryParam("page", pageable.getPageNumber())
-                .queryParam("size", pageable.getPageSize());
-
-        // 1. LÓGICA DE ORDENAÇÃO CORRIGIDA
-        if (pageable.getSort().isSorted()) {
-            // Se o frontend mandou sort, repassa exatamente como veio
-            pageable.getSort().forEach(order -> {
-                uriBuilder.queryParam("sort", order.getProperty() + "," + order.getDirection());
-            });
+        final List<String> urlsParaChamar;
+        if (CollectionUtils.isEmpty(concessionarias)) {
+            urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
         } else {
-            // Se não mandou, força o padrão DESC para pegar os mais recentes
-            uriBuilder.queryParam("sort", "data,desc");
-            uriBuilder.queryParam("sort", "hora,desc");
+            urlsParaChamar = concessionarias.stream()
+                    .map(nome -> serviceUrlMap.get(nome.toLowerCase()))
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
         }
 
-        if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
-        if (praca != null && !praca.isBlank()) uriBuilder.queryParam("praca", praca);
-        if (rodovia != null && !rodovia.isBlank()) uriBuilder.queryParam("rodovia", rodovia);
-        if (km != null && !km.isBlank()) uriBuilder.queryParam("km", km);
-        if (sentido != null && !sentido.isBlank()) uriBuilder.queryParam("sentido", sentido);
-        if (data != null) uriBuilder.queryParam("data", data.toString());
-        if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial.toString());
-        if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
+        if (urlsParaChamar.isEmpty()) return Collections.emptyList();
 
-        String urlFinal = uriBuilder.toUriString();
-        log.info("BFF chamando serviço via Service Discovery [{}]: {}", baseUrl, urlFinal);
+        List<CompletableFuture<List<RadarDTO>>> futures = urlsParaChamar.stream()
+                .map(baseUrl -> CompletableFuture.supplyAsync(
+                        () -> fetchAllPagesFromMicroservice(baseUrl, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal),
+                        executorService
+                ))
+                .collect(Collectors.toList());
 
-        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("radaresService");
+        List<RadarDTO> allRadars = futures.stream()
+                .map(f -> {
+                    try { return f.get(60, TimeUnit.SECONDS); }
+                    catch (Exception e) { return Collections.<RadarDTO>emptyList(); }
+                })
+                .flatMap(List::stream)
+                .sorted(Comparator.comparing(RadarDTO::getData, Comparator.reverseOrder()).thenComparing(RadarDTO::getHora, Comparator.reverseOrder()))
+                .collect(Collectors.toList());
 
-        return circuitBreaker.run(
-                () -> {
-                    try {
-                        ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(urlFinal, RadarPageDTO.class);
-                        return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
-                    } catch (Exception e) {
-                        log.error("Erro chamando {}: {}", baseUrl, e.toString());
-                        throw e;
-                    }
-                },
-                throwable -> {
-                    // Logamos aqui para saber se foi o Circuit Breaker que abriu ou Timeout
-                    log.warn("Fallback acionado para {}: {}", baseUrl, throwable.toString());
-                    return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
-                }
-        );
+        log.info("Exportação finalizada. Total de registros: {}", allRadars.size());
+        return allRadars;
     }
+
+    /**
+     * Retorna os últimos radares processados.
+     * Tenta buscar do Cache em Memória (RabbitMQ) primeiro.
+     * Se estiver vazio (ex: após restart), busca do Banco de Dados via API Monitoramento.
+     */
+    public List<RadarDTO> getUltimosRadaresProcessados() {
+        // 1. Tenta pegar do cache em tempo real (dados chegando agora)
+        List<RadarDTO> fromMemory = new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
+
+        if (!fromMemory.isEmpty()) {
+            return fromMemory;
+        }
+
+        // 2. Se a memória estiver vazia, busca os últimos do histórico no Banco de Dados
+        log.info("Cache de memória vazio. Buscando últimos registros no Banco de Dados...");
+        return fetchUltimosFromDatabase();
+    }
+
+    private List<RadarDTO> fetchUltimosFromDatabase() {
+        // Endpoint que criamos/sugerimos no MonitoramentoController
+        String url = getMonitoramentoUrl("/api/monitoramento/ultimos");
+
+        try {
+            // Usa o 'currentRestTemplate' para garantir a conexão correta (IP ou Eureka)
+            ResponseEntity<List<RadarDTO>> response = monitoramentoRestTemplate.exchange(
+                    url,
+                    HttpMethod.GET,
+                    null,
+                    new ParameterizedTypeReference<List<RadarDTO>>() {}
+            );
+
+            List<RadarDTO> result = response.getBody();
+            if (result != null) {
+                log.info("Recuperados {} registros do histórico.", result.size());
+                return result;
+            }
+        } catch (Exception e) {
+            log.error("Falha ao buscar histórico de radares no Monitoramento: {}", e.getMessage());
+        }
+
+        return Collections.emptyList();
+    }
+
+
+
+    // =========================================================================
+    // MÉTODOS PRIVADOS AUXILIARES
+    // =========================================================================
+
+
 
     /**
      * Busca todas as páginas de um microserviço (para exportação).
@@ -556,44 +645,45 @@ public class RadarsBFFService {
         boolean hasMorePages = true;
 
         while (hasMorePages) {
+            // ✅ CORREÇÃO: Endpoint correto é /busca-local se tiver data, ou /busca-placa se tiver placa
+            // Lógica simplificada: Se tem placa, usa busca-placa. Se tem data, busca-local.
+            String endpoint = (placa != null && !placa.isBlank()) ? "/radares/busca-placa" : "/radares/busca-local";
+
             UriComponentsBuilder uriBuilder = UriComponentsBuilder
-                    .fromUriString("http://" + baseUrl + "/radares/filtros")
+                    .fromUriString("http://" + baseUrl + endpoint)
                     .queryParam("page", pageNumber)
-                    .queryParam("size", pageSize)
-                    .queryParam("sort", "data,desc")
-                    .queryParam("sort", "hora,desc");
+                    .queryParam("size", pageSize);
 
             if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
-            if (praca != null && !praca.isBlank()) uriBuilder.queryParam("praca", praca);
-            if (rodovia != null && !rodovia.isBlank()) uriBuilder.queryParam("rodovia", rodovia);
-            if (km != null && !km.isBlank()) uriBuilder.queryParam("km", km);
-            if (sentido != null && !sentido.isBlank()) uriBuilder.queryParam("sentido", sentido);
-            if (data != null) uriBuilder.queryParam("data", data.toString());
-            if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial.toString());
-            if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal.toString());
+            else {
+                // Filtros de Local
+                if (data != null) uriBuilder.queryParam("data", data);
+                if (rodovia != null) uriBuilder.queryParam("rodovia", rodovia);
+                if (km != null) uriBuilder.queryParam("km", km);
+                if (sentido != null) uriBuilder.queryParam("sentido", sentido);
+                if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial);
+                if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal);
+            }
 
             try {
-                ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(
+                // ✅ CORREÇÃO: Usando RestPage para exportação também
+                ResponseEntity<RestPage<RadarDTO>> response = loadBalancedRestTemplate.exchange(
                         uriBuilder.toUriString(),
-                        RadarPageDTO.class
+                        HttpMethod.GET,
+                        null,
+                        new ParameterizedTypeReference<RestPage<RadarDTO>>() {}
                 );
 
-                RadarPageDTO page = response.getBody();
-                if (page != null && page.getContent() != null && !page.getContent().isEmpty()) {
+                RestPage<RadarDTO> page = response.getBody();
+                if (page != null && !page.getContent().isEmpty()) {
                     allRadars.addAll(page.getContent());
                     pageNumber++;
-
-                    // Verifica se há mais páginas
-                    if (page.getPage() != null) {
-                        hasMorePages = pageNumber < page.getPage().getTotalPages();
-                    } else {
-                        hasMorePages = false;
-                    }
+                    hasMorePages = pageNumber < page.getTotalPages();
                 } else {
                     hasMorePages = false;
                 }
             } catch (Exception e) {
-                log.error("Erro ao buscar página {} de {}: {}", pageNumber, baseUrl, e.toString());
+                log.error("Erro na exportação de {}: {}", baseUrl, e.getMessage());
                 hasMorePages = false;
             }
         }
@@ -664,44 +754,6 @@ public class RadarsBFFService {
         return allRadars;
     }
 
-    /**
-     * Agrega múltiplas páginas de diferentes serviços em uma única página.
-     */
-    private RadarPageDTO aggregatePages(List<RadarPageDTO> pages, Pageable pageable) {
-        // 1. Combina o conteúdo de todas as páginas recebidas (caso haja múltiplos serviços)
-        List<RadarDTO> combinedContent = pages.stream()
-                .filter(p -> p != null && p.getContent() != null)
-                .flatMap(p -> p.getContent().stream())
-                .collect(Collectors.toList());
-
-        // 2. Ordena em memória (importante se vier de múltiplos serviços)
-        // Se o sort for complexo no futuro, essa lógica precisará ser mais dinâmica
-        if (pageable.getSort().isSorted()) {
-            // Lógica básica para respeitar o sort do pageable se possível,
-            // mas aqui forçamos o padrão esperado pelo usuário para simplificar.
-            combinedContent.sort(Comparator
-                    .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
-                    .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
-        } else {
-            combinedContent.sort(Comparator
-                    .comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
-                    .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())));
-        }
-
-        long totalElements = pages.stream()
-                .filter(p -> p != null && p.getPage() != null)
-                .mapToLong(p -> p.getPage().getTotalElements())
-                .sum();
-
-        List<RadarDTO> paginatedContent = combinedContent.stream()
-                //.skip((long) pageable.getPageNumber() * pageable.getPageSize())
-                .limit(pageable.getPageSize())
-                .collect(Collectors.toList());
-
-        int totalPages = pageable.getPageSize() > 0 ? (int) Math.ceil((double) totalElements / pageable.getPageSize()) : 0;
-
-        return new RadarPageDTO(paginatedContent, new PageMetadata(pageable.getPageNumber(), pageable.getPageSize(), totalElements, totalPages));
-    }
 
     /**
      * Faz a chamada REST para o endpoint /geo-search do microserviço específico.
@@ -722,36 +774,18 @@ public class RadarsBFFService {
                 .queryParam("latitude", latitude)
                 .queryParam("longitude", longitude)
                 .queryParam("raio", raio)
-                .queryParam("data", data.toString())
-                .queryParam("horaInicio", horaInicio.toString())
-                .queryParam("horaFim", horaFim.toString())
+                .queryParam("data", data)
                 .queryParam("page", pageable.getPageNumber())
                 .queryParam("size", pageable.getPageSize());
 
-        // Ordenação padrão por data/hora se não vier especificado
-        uriBuilder.queryParam("sort", "data,desc");
-        uriBuilder.queryParam("sort", "hora,desc");
+        if (horaInicio != null) uriBuilder.queryParam("horaInicio", horaInicio);
+        if (horaFim != null) uriBuilder.queryParam("horaFim", horaFim);
 
-        String urlFinal = uriBuilder.toUriString();
-        log.info("BFF Geo-Search [{}]: {}", baseUrl, urlFinal);
+        // ✅ CORREÇÃO: Usando RestPage
+        ParameterizedTypeReference<RestPage<RadarDTO>> responseType =
+                new ParameterizedTypeReference<RestPage<RadarDTO>>() {};
 
-        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("radaresGeoService");
-
-        return circuitBreaker.run(
-                () -> {
-                    try {
-                        ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(urlFinal, RadarPageDTO.class);
-                        return response.getBody() != null ? response.getBody() : new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
-                    } catch (Exception e) {
-                        log.error("Erro chamando GeoSearch em {}: {}", baseUrl, e.toString());
-                        throw e;
-                    }
-                },
-                throwable -> {
-                    log.warn("Fallback GeoSearch para {}: {}", baseUrl, throwable.toString());
-                    return new RadarPageDTO(Collections.emptyList(), new PageMetadata(0, 0, 0, 0));
-                }
-        );
+        return executeCircuitBreakerRequest("geoSearch", baseUrl, uriBuilder.toUriString(), responseType);
     }
 
     private List<RadarLocationDTO> fetchLocationsFromMicroservices(String baseUrl) {

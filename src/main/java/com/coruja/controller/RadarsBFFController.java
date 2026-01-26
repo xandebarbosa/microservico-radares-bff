@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
@@ -28,45 +29,23 @@ public class RadarsBFFController {
 
     private final RadarsBFFService radarsBFFService;
 
-    /**
-     * Busca todos os registros de radares para uma placa específica.
-     * @param placa A placa do veículo a ser pesquisada.     *
-     * @return Uma página de resultados de radares para a placa informada.
-     */
-//    @GetMapping("/placa/{placa}")
-//    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-//    public ResponseEntity<RadarPageDTO> buscarPorPlaca(
-//            @PathVariable String placa,
-//            Pageable pageable
-//    ) {
-//        log.info("📍 Buscando por placa: {}", placa);
-//        RadarPageDTO result = radarsBFFService.buscarComFiltros(
-//                null, placa, null, null, null, null, null, null, null, pageable
-//        );
-//        return ResponseEntity.ok(result);
-//    }
+
 
     /**
-     * Busca registros de radares por placa (Total ou Parcial).
-     * Ex: "ABC-1234" (Total) ou "ABC" (Parcial).
-     * @param placa A placa ou trecho da placa a ser pesquisada.
-     * @return Uma página de resultados de radares.
+     * ✅ BUSCA POR PLACA (Histórico Completo)
+     * Substitui o antigo /placa/{placa} para padronizar query params.
      */
-    @GetMapping("/placa/{placa}")
+    @GetMapping("/busca-placa")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<RadarPageDTO> buscarPorPlaca(
-            @PathVariable String placa,
-            Pageable pageable
-    ){
-        // ✅ Refatoração: Sanitização da entrada para evitar erros de case-sensitive
+            @RequestParam String placa,
+            @PageableDefault(size = 20) Pageable pageable
+    ) {
+        // Sanitização simples
         String termoBusca = (placa != null) ? placa.trim().toUpperCase() : "";
 
-        log.info("📍 Buscando por placa (parcial ou total): {}", termoBusca);
-
-        RadarPageDTO result = radarsBFFService.buscarComFiltros(
-                null, termoBusca, null, null, null, null, null, null, null, pageable
-        );
-        return ResponseEntity.ok(result);
+        log.info("📍 [BFF] Buscando histórico completo para placa: {}", termoBusca);
+        return ResponseEntity.ok(radarsBFFService.buscarPorPlaca(termoBusca, pageable));
     }
 
 
@@ -84,91 +63,28 @@ public class RadarsBFFController {
      * @param pageable Parâmetros de paginação.
      * @return Página com os resultados filtrados.
      */
-    @GetMapping("/filtros")
+    /**
+     * ✅ BUSCA POR LOCAL/Concessionaria (Operacional)
+     * Exige Data. Otimizada para usar as partições do banco.
+     */
+    @GetMapping("/busca-local")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<RadarPageDTO> buscarComTodosOsFiltros(
-            @RequestParam(required = false) List<String> concessionaria,
-            @RequestParam(required = false) String placa,
-            @RequestParam(required = false) String praca,
+    public ResponseEntity<RadarPageDTO> buscarPorLocal(
+            @RequestParam(required = false) List<String> concessionaria, // Parâmetro adicionado
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             @RequestParam(required = false) String rodovia,
             @RequestParam(required = false) String km,
             @RequestParam(required = false) String sentido,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
-            Pageable pageable
+            @PageableDefault(size = 20) Pageable pageable
     ) {
-        log.info("🔍 Buscando com filtros");
-        RadarPageDTO result = radarsBFFService.buscarComFiltros(
-                concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal, pageable
-        );
-        return ResponseEntity.ok(result);
-    }
+        log.info("🔍 [BFF] Buscando Local | Concessionárias: {} | Data: {} | Rodovia: {}", concessionaria, data, rodovia);
 
-    /**
-     * Busca registros de radares em uma concessionária específica com filtros.
-     * @param nomeConcessionaria O nome da concessionária (ex: rondon, cart, eixo, entrevias).
-     * @param placa Placa do veículo (opcional).
-     * @param praca Praça de pedágio (opcional).
-     * @param rodovia Código da rodovia (opcional).
-     * @param km Quilômetro da rodovia (opcional).
-     * @param sentido Sentido da via (opcional).
-     * @param data Data específica (opcional).
-     * @param horaInicial Hora inicial do intervalo (opcional).
-     * @param horaFinal Hora final do intervalo (opcional).
-     * @param pageable Parâmetros de paginação.
-     * @return Página com os resultados filtrados da concessionária.
-     */
-    @GetMapping("/concessionaria/{nomeConcessionaria}/filtros")
-    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<RadarPageDTO> buscarPorConcessionaria(
-            @PathVariable String nomeConcessionaria,
-            @RequestParam(required = false) String placa,
-            @RequestParam(required = false) String praca,
-            @RequestParam(required = false) String rodovia,
-            @RequestParam(required = false) String km,
-            @RequestParam(required = false) String sentido,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
-            Pageable pageable
-    ) {
-        log.info("🏢 Buscando concessionária: {}", nomeConcessionaria);
-        RadarPageDTO result = radarsBFFService.buscarComFiltros(
-                List.of(nomeConcessionaria), placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal, pageable
-        );
-        return ResponseEntity.ok(result);
-    }
-
-    @GetMapping("/concessionaria/{nomeConcessionaria}/opcoes-filtro")
-    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<FilterOptionsDTO> getFiltersOptions(@PathVariable String nomeConcessionaria) {
-        log.info("⚙️ Buscando opções de filtro: {}", nomeConcessionaria);
-        FilterOptionsDTO result = radarsBFFService.getFilterOptionsForConcessionaria(nomeConcessionaria);
-        return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
-                .body(result);
-    }
-
-    /**
-     * Busca os KMs disponíveis para uma rodovia específica em uma concessionária.
-     * @param nomeConcessionaria Nome da concessionária.
-     * @param rodovia Código da rodovia.
-     * @return Lista de KMs disponíveis.
-     */
-    @GetMapping("/concessionaria/{nomeConcessionaria}/kms-por-rodovia")
-    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<List<String>> getKmsByRodovia(
-            @PathVariable String nomeConcessionaria,
-            @RequestParam String rodovia
-    ) {
-        log.info("📏 Buscando KMs para rodovia: {} ({})", rodovia, nomeConcessionaria);
-        List<String> result = radarsBFFService.getKmsForRodoviaByConcessionaria(nomeConcessionaria, rodovia);
-
-        // CACHE-CONTROL: Navegador guarda por 30 minutos
-        return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
-                .body(result);
+        return ResponseEntity.ok(radarsBFFService.buscarPorLocal(
+                concessionaria, // Passando a lista para o service
+                data, horaInicial, horaFinal, rodovia, km, sentido, pageable
+        ));
     }
 
     /**
@@ -281,5 +197,69 @@ public class RadarsBFFController {
                 latitude, longitude, raio, data, horaInicio, horaFim
         );
         return ResponseEntity.ok(result);
+    }
+
+    /**
+     * MANTIDO POR COMPATIBILIDADE (Se necessário)
+     * Redireciona para o buscarPorPlaca novo
+     */
+    @GetMapping("/placa/{placa}")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<RadarPageDTO> buscarPorPlacaLegacy(
+            @PathVariable String placa,
+            Pageable pageable
+    ) {
+        return buscarPorPlaca(placa, pageable);
+    }
+
+    // ==================================================================================
+    // 2. GESTÃO DE DOMÍNIO (RODOVIAS E KMs) - NOVO
+    // ==================================================================================
+
+    @GetMapping("/rodovias")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<List<RodoviaDTO>> listarRodovias() {
+        log.info("🛣️ [BFF] Listando rodovias");
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(1, TimeUnit.HOURS)) // Cache no navegador
+                .body(radarsBFFService.listarRodovias());
+    }
+
+    @PostMapping("/rodovias")
+    @PreAuthorize("hasRole('ADMIN')") // Apenas Admin pode criar
+    public ResponseEntity<RodoviaDTO> adicionarRodovia(@RequestBody RodoviaDTO rodovia) {
+        log.info("🛣️ [BFF] Adicionando rodovia: {}", rodovia.getNome());
+        return ResponseEntity.ok(radarsBFFService.salvarRodovia(rodovia));
+    }
+
+    @DeleteMapping("/rodovias/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Void> removerRodovia(@PathVariable Long id) {
+        log.info("🗑️ [BFF] Removendo rodovia ID: {}", id);
+        radarsBFFService.deletarRodovia(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    // --- KMs ---
+
+    @GetMapping("/rodovias/{rodoviaId}/kms")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<List<KmRodoviaDTO>> listarKms(@PathVariable Long rodoviaId) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
+                .body(radarsBFFService.listarKmsPorRodovia(rodoviaId));
+    }
+
+    @PostMapping("/kms")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<KmRodoviaDTO> adicionarKm(@RequestBody KmRodoviaDTO km) {
+        return ResponseEntity.ok(radarsBFFService.salvarKm(km));
+    }
+
+    @DeleteMapping("/kms/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Void> removerKm(@PathVariable Long id) {
+        radarsBFFService.deletarKm(id);
+        return ResponseEntity.noContent().build();
     }
 }
