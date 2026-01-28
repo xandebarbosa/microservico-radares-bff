@@ -1,19 +1,16 @@
 package com.coruja.dto;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-
 import java.io.Serializable;
 
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
-//@JsonIgnoreProperties(ignoreUnknown = true)
-public class PageMetadata implements Serializable {
-    private int size;
+public class PageMetadataBuscaLocal implements Serializable {
     private int number;
+    private int size;
     private long totalElements;
     private int totalPages;
 }

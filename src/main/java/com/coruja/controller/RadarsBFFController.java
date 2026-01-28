@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 @RestController
-@RequestMapping("/radares")
+@RequestMapping(value = "/radares")
 @RequiredArgsConstructor
 @Slf4j
 public class RadarsBFFController {
@@ -75,6 +75,7 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             @RequestParam(required = false) String rodovia,
+            @RequestParam(required = false) String praca,
             @RequestParam(required = false) String km,
             @RequestParam(required = false) String sentido,
             @PageableDefault(size = 20) Pageable pageable
@@ -83,7 +84,7 @@ public class RadarsBFFController {
 
         return ResponseEntity.ok(radarsBFFService.buscarPorLocal(
                 concessionaria, // Passando a lista para o service
-                data, horaInicial, horaFinal, rodovia, km, sentido, pageable
+                data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable
         ));
     }
 
