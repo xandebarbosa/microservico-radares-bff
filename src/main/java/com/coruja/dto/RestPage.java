@@ -28,19 +28,58 @@ public class RestPage<T> extends PageImpl<T> {
                     @JsonProperty("totalPages") int totalPages,
                     @JsonProperty("sort") JsonNode sort,
                     @JsonProperty("first") boolean first,
-                    @JsonProperty("numberOfElements") int numberOfElements) {
+                    @JsonProperty("numberOfElements") int numberOfElements,
+                    @JsonProperty("empty") Boolean empty
+    ) {
 
-        super(content, PageRequest.of(number, size), totalElements);
+        super(content != null ? content : new ArrayList<>(), PageRequest.of(number, size), totalElements != null ? totalElements : 0L);
     }
 
+    /**
+     * ✅ CONSTRUTOR ALTERNATIVO - Para respostas customizadas (RadarPageDTO)
+     *
+     * Exemplo de JSON recebido:
+     * {
+     *   "content": [...],
+     *   "page": {
+     *     "number": 0,
+     *     "size": 10,
+     *     "totalElements": 100,
+     *     "totalPages": 10
+     *   }
+     * }
+     */
+    public RestPage(
+            @JsonProperty("content") List<T> content,
+            @JsonProperty("page") PageMetadata pageMetadata
+    ) {
+        super(
+                content != null ? content : new ArrayList<>(),
+                PageRequest.of(
+                        pageMetadata != null ? pageMetadata.getNumber() : 0,
+                        pageMetadata != null && pageMetadata.getSize() > 0 ? pageMetadata.getSize() : 20
+                ),
+                pageMetadata != null ? pageMetadata.getTotalElements() : 0L
+        );
+    }
+
+    /**
+     * Construtor padrão com Pageable
+     */
     public RestPage(List<T> content, Pageable pageable, long total) {
         super(content, pageable, total);
     }
 
+    /**
+     * Construtor simplificado
+     */
     public RestPage(List<T> content) {
         super(content);
     }
 
+    /**
+     * Construtor vazio
+     */
     public RestPage() {
         super(new ArrayList<>());
     }

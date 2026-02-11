@@ -2,6 +2,7 @@ package com.coruja.services;
 
 import com.coruja.dto.*;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,10 +23,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -40,9 +38,13 @@ public class RadarsBFFService {
     private RestTemplate monitoramentoRestTemplate;
 
     private final RealtimeUpdateService realtimeUpdateService;
-    private final Map<String, String> serviceUrlMap = new HashMap<>();
+    //private final Map<String, String> serviceUrlMap = new HashMap<>();
     private final CircuitBreakerFactory circuitBreakerFactory;
-    private final ExecutorService executorService;
+    // ✅ Uso de Virtual Threads para escalabilidade massiva (Java 21+)
+    private final ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
+
+    // ✅ Thread-safe para acesso simultâneo
+    private final ConcurrentHashMap<String, String> serviceUrlMap = new ConcurrentHashMap<>();
 
     // URL do Monitoramento (pode ser via Eureka ou IP Direto)
     @Value("${microservico.monitoramento.url:http://MICROSERVICO-MONITORAMENTO}")
@@ -63,7 +65,7 @@ public class RadarsBFFService {
         this.realtimeUpdateService = realtimeUpdateService;
         this.circuitBreakerFactory = circuitBreakerFactory;
         // Thread pool para chamadas paralelas aos microserviços
-        this.executorService = Executors.newFixedThreadPool(10);
+        //this.executorService = Executors.newFixedThreadPool(10);
     }
 
     /**
@@ -90,16 +92,21 @@ public class RadarsBFFService {
         // Mapeie para os NOMES DE SERVIÇO (spring.application.name)
         // Por padrão, o Eureka registra os nomes em MAIÚSCULAS.
         serviceUrlMap.put("cart", "MICROSERVICO-RADARES-CART");
-        //serviceUrlMap.put("eixo", "MICROSERVICO-RADARES-EIXO");
+        serviceUrlMap.put("eixo", "MICROSERVICO-RADARES-EIXO");
         //serviceUrlMap.put("entrevias", "MICROSERVICO-RADARES-ENTREVIAS");
         //serviceUrlMap.put("rondon", "MICROSERVICO-RADARES-RONDON");
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
 
+    @PreDestroy
+    public void shutdown() {
+        log.info("Encerrando ExecutorService do BFF...");
+        executorService.shutdown();
+    }
+
     // ==================================================================================
     // 1. BUSCA POR PLACA (HISTÓRICO COMPLETO)
     // ==================================================================================
-
     public RadarPageDTO buscarPorPlaca(String placa, Pageable pageable) {
         // Busca em todos os serviços registrados, pois o histórico pode estar em qualquer um
         List<String> urlsParaChamar = new ArrayList<>(serviceUrlMap.values());
@@ -120,30 +127,32 @@ public class RadarsBFFService {
     }
 
     private Object fetchPlacaFromMicroservice(String baseUrl, String placa, Pageable pageable) {
-        // Chama o novo endpoint /busca-placa
-        UriComponentsBuilder uriBuilder = UriComponentsBuilder
-                .fromUriString("http://" + baseUrl + "/radares/busca-placa")
-                .queryParam("placa", placa)
-                .queryParam("page", pageable.getPageNumber())
-                .queryParam("size", pageable.getPageSize())
-                .queryParam("sort", "data,desc") // Força ordenação cronológica
-                .queryParam("sort", "hora,desc");
+        try {
+            UriComponentsBuilder uriBuilder = UriComponentsBuilder
+                    .fromUriString("http://" + baseUrl + "/radares/busca-placa")
+                    .queryParam("placa", placa)
+                    .queryParam("page", pageable.getPageNumber())
+                    .queryParam("size", pageable.getPageSize())
+                    .queryParam("sort", "data,desc")
+                    .queryParam("sort", "hora,desc");
 
-        String urlFinal = uriBuilder.toUriString();
-        log.info("📡 BFF Request [{}]: {}", baseUrl, urlFinal);
+            String urlFinal = uriBuilder.toUriString();
 
-        // USANDO O RESTPAGE (Wrapper Genérico)
-        // Precisamos usar ParameterizedTypeReference para listas/genéricos
-        ParameterizedTypeReference<RestPage<RadarDTO>> responseType =
-                new ParameterizedTypeReference<RestPage<RadarDTO>>() {};
+            // Usa o método corrigido
+            ParameterizedTypeReference<RestPage<RadarDTO>> responseType =
+                    new ParameterizedTypeReference<RestPage<RadarDTO>>() {};
 
-        return executeCircuitBreakerRequest("buscaPlaca", baseUrl, urlFinal, responseType);
+            return executeCircuitBreakerRequest("buscaPlaca", baseUrl, urlFinal, responseType);
+
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao preparar chamada para {}: {}", baseUrl, e.getMessage());
+            return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
+        }
     }
 
     // ==================================================================================
     // 2. BUSCA POR LOCAL (OPERACIONAL / FILTROS)
     // ==================================================================================
-
     /**
      * ✅ 1. MÉTODO PRINCIPAL (Orquestrador)
      * Decide quais serviços chamar e executa em paralelo.
@@ -154,9 +163,9 @@ public class RadarsBFFService {
             LocalTime horaInicial,
             LocalTime horaFinal,
             String rodovia,
+            String praca,
             String km,
             String sentido,
-            String praca,
             Pageable pageable
     ) {
         // A. Define quais serviços chamar
@@ -220,7 +229,7 @@ public class RadarsBFFService {
                     .toUriString();
 
             // 🔥 O PULO DO GATO: Chama o Circuit Breaker passando a URL montada
-            return executeCircuitBreakerRequestBuscaPorLocal("radares-cb", baseUrl, urlCompleta);
+            return executeCircuitBreakerRequestBuscaPorLocal("radaresLocal", baseUrl, urlCompleta);
 
         } catch (Exception e) {
             log.error("🔥 Erro ao preparar chamada para {}: {}", baseUrl, e.getMessage());
@@ -234,9 +243,16 @@ public class RadarsBFFService {
 
     @Cacheable(value = "lista-rodovias-bff")
     public List<RodoviaDTO> listarRodovias() {
-        // Vamos buscar da 'cart' como fonte principal, ou agregar de todas
-        // Por simplificação, pegamos do primeiro serviço disponível ou iteramos
-        return fetchListFromAll("rodovias", RodoviaDTO.class);
+        log.info("🔍 BFF: Solicitando lista de rodovias aos microserviços...");
+
+        // Tenta buscar de todos os serviços mapeados e agregar
+        List<RodoviaDTO> rodovias = fetchListFromAll("rodovias", RodoviaDTO.class);
+
+        if (rodovias.isEmpty()) {
+            log.warn("⚠️ Nenhuma rodovia encontrada em nenhum microserviço.");
+        }
+
+        return rodovias;
     }
 
     @CacheEvict(value = "lista-rodovias-bff", allEntries = true)
@@ -435,7 +451,8 @@ public class RadarsBFFService {
 
         return cb.run(() -> {
             try {
-                // Faz a chamada esperando o RestPage
+                log.info("📡 [BFF] Chamando: {}", url);
+                // Primeira tentativa: RestPage (formato Spring Data padrão)
                 ResponseEntity<RestPage<RadarDTO>> response = loadBalancedRestTemplate.exchange(
                         url,
                         HttpMethod.GET,
@@ -446,6 +463,7 @@ public class RadarsBFFService {
                 RestPage<RadarDTO> page = response.getBody();
 
                 if (page == null || page.getContent().isEmpty()) {
+                    log.warn("⚠️ [BFF] Resposta vazia de {}", baseUrl);
                     return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
                 }
 
@@ -457,14 +475,40 @@ public class RadarsBFFService {
                         page.getTotalPages()
                 );
 
+                log.info("✅ [BFF] Sucesso: {} registros de {}", page.getContent().size(), baseUrl);
                 return new RadarPageDTO(page.getContent(), metadata);
 
-            } catch (Exception e) {
-                log.error("🔥 Erro ao chamar {}: {}", url, e.getMessage());
-                throw e;
+            } catch (Exception firstError) {
+                log.warn("⚠️ [BFF] Erro no formato RestPage, tentando RadarPageDTO: {}", firstError.getMessage());
+
+                try {
+                    // Segunda tentativa: RadarPageDTO (formato customizado)
+                    ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            null,
+                            RadarPageDTO.class
+                    );
+
+                    RadarPageDTO result = response.getBody();
+
+                    if (result == null) {
+                        log.warn("⚠️ [BFF] Resposta nula de {}", baseUrl);
+                        return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
+                    }
+
+                    log.info("✅ [BFF] Sucesso (RadarPageDTO): {} registros de {}",
+                            result.getContent() != null ? result.getContent().size() : 0, baseUrl);
+
+                    return result;
+
+                } catch (Exception secondError) {
+                    log.error("❌ [BFF] Falha em ambos os formatos de {}: {}", baseUrl, secondError.getMessage());
+                    throw firstError; // Lança o primeiro erro para o Circuit Breaker
+                }
             }
         }, throwable -> {
-            log.warn("⚠️ Fallback para {}: {}", baseUrl, throwable.getMessage());
+            log.warn("⚠️ [BFF] Circuit Breaker ativo para {}: {}", baseUrl, throwable.getMessage());
             return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
         });
     }
@@ -478,7 +522,8 @@ public class RadarsBFFService {
 
         return cb.run(() -> {
             try {
-                // ✅ MUDANÇA: Agora esperamos RadarPageDTO direto
+                log.info("📡 [BFF Local] Chamando: {}", url);
+                // Busca local geralmente retorna RadarPageDTO diretamente
                 ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(
                         url,
                         RadarPageDTO.class
@@ -486,19 +531,22 @@ public class RadarsBFFService {
 
                 RadarPageDTO body = response.getBody();
 
-                // Se vier nulo ou vazio, retornamos um objeto vazio seguro
                 if (body == null) {
+                    log.warn("⚠️ [BFF Local] Resposta nula de {}", baseUrl);
                     return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
                 }
+
+                log.info("✅ [BFF Local] Sucesso: {} registros de {}",
+                        body.getContent() != null ? body.getContent().size() : 0, baseUrl);
 
                 return body;
 
             } catch (Exception e) {
-                log.error("🔥 Erro ao chamar {}: {}", url, e.getMessage());
+                log.error("❌ [BFF Local] Erro ao chamar {}: {}", url, e.getMessage());
                 throw e; // Lança para ativar o fallback do Circuit Breaker
             }
         }, throwable -> {
-            log.warn("⚠️ Fallback para {}: {}", baseUrl, throwable.getMessage());
+            log.warn("⚠️ [BFF Local] Fallback para {}: {}", baseUrl, throwable.getMessage());
             return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
         });
     }
@@ -757,6 +805,7 @@ public class RadarsBFFService {
                 // Filtros de Local
                 if (data != null) uriBuilder.queryParam("data", data);
                 if (rodovia != null) uriBuilder.queryParam("rodovia", rodovia);
+                if (praca != null) uriBuilder.queryParam("praca", praca);
                 if (km != null) uriBuilder.queryParam("km", km);
                 if (sentido != null) uriBuilder.queryParam("sentido", sentido);
                 if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial);

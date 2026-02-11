@@ -4,8 +4,6 @@ import com.coruja.dto.*;
 import com.coruja.services.RadarsBFFService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.cache.annotation.Cacheable;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -14,10 +12,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -41,19 +39,28 @@ public class RadarsBFFController {
             @RequestParam String placa,
             @PageableDefault(size = 20) Pageable pageable
     ) {
-        // Sanitização simples
-        String termoBusca = (placa != null) ? placa.trim().toUpperCase() : "";
+        try {
+            // Sanitização simples
+            String termoBusca = (placa != null) ? placa.trim().toUpperCase() : "";
 
-        log.info("📍 [BFF] Buscando histórico completo para placa: {}", termoBusca);
-        return ResponseEntity.ok(radarsBFFService.buscarPorPlaca(termoBusca, pageable));
+            log.info("📍 [BFF] Buscando histórico completo para placa: {}", termoBusca);
+            return ResponseEntity.ok(radarsBFFService.buscarPorPlaca(termoBusca, pageable));
+        } catch (Exception e) {
+            log.error("🔥 Erro ao processar busca por placa: {}", e.getMessage());
+            // Retorna um DTO de página vazio em vez de uma String
+            RadarPageDTO emptyPage = new RadarPageDTO();
+            emptyPage.setContent(Collections.emptyList());
+            // Configure metadados de página zerados se necessário
+
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+        }
+
     }
 
 
     /**
      * Endpoint genérico que pode buscar em todas ou em concessionárias específicas.
      * @param concessionaria Lista de concessionárias para filtrar (opcional).
-     * @param placa Placa do veículo (opcional).
-     * @param praca Praça de pedágio (opcional).
      * @param rodovia Código da rodovia (opcional).
      * @param km Quilômetro da rodovia (opcional).
      * @param sentido Sentido da via (opcional).
@@ -62,8 +69,6 @@ public class RadarsBFFController {
      * @param horaFinal Hora final do intervalo (opcional).
      * @param pageable Parâmetros de paginação.
      * @return Página com os resultados filtrados.
-     */
-    /**
      * ✅ BUSCA POR LOCAL/Concessionaria (Operacional)
      * Exige Data. Otimizada para usar as partições do banco.
      */
@@ -112,10 +117,10 @@ public class RadarsBFFController {
      * Não utiliza paginação - retorna todos os resultados de uma vez.
      * @param concessionaria Lista de concessionárias para filtrar (opcional).
      * @param placa Placa do veículo (opcional).
-     * @param praca Praça de pedágio (opcional).
      * @param rodovia Código da rodovia (opcional).
      * @param km Quilômetro da rodovia (opcional).
      * @param sentido Sentido da via (opcional).
+     * @param praca Praça de pedágio (opcional).
      * @param data Data específica (opcional).
      * @param horaInicial Hora inicial do intervalo (opcional).
      * @param horaFinal Hora final do intervalo (opcional).
@@ -126,17 +131,17 @@ public class RadarsBFFController {
     public ResponseEntity<List<RadarDTO>> exportarComFiltros(
             @RequestParam(required = false) List<String> concessionaria,
             @RequestParam(required = false) String placa,
-            @RequestParam(required = false) String praca,
             @RequestParam(required = false) String rodovia,
             @RequestParam(required = false) String km,
             @RequestParam(required = false) String sentido,
+            @RequestParam(required = false) String praca,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal
     ) {
         log.info("💾 Exportando dados com filtros");
         List<RadarDTO> result = radarsBFFService.buscarTodosParaExportacao(
-                concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
+                concessionaria, placa, rodovia, km, sentido, praca, data, horaInicial, horaFinal
         );
         return ResponseEntity.ok(result);
     }

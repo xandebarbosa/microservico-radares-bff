@@ -36,7 +36,8 @@ public class CircuitBreakerConfiguration {
                         // Threshold de chamadas lentas (50%)
                         .slowCallRateThreshold(50)
                         // Duração para considerar uma chamada lenta (5s)
-                        .slowCallDurationThreshold(Duration.ofSeconds(30))
+                        .slowCallDurationThreshold(Duration.ofSeconds(5))
+                        .slidingWindowSize(100)
                         .build())
                 .build());
     }

@@ -75,10 +75,16 @@ public class MonitoramentoBFFService {
     }
 
     public PageImpl<? extends Object> listarMonitorados(Pageable pageable) {
+
+        String sortParam = pageable.getSort().stream()
+                .map(order -> order.getProperty() + "," + order.getDirection().name().toLowerCase())
+                .findFirst()
+                .orElse("createdAt,desc");
         // Usa a URL dinâmica
         String url = UriComponentsBuilder.fromUriString(getUrl("/api/monitoramento"))
                 .queryParam("page", pageable.getPageNumber())
                 .queryParam("size", pageable.getPageSize())
+                .queryParam("sort", sortParam)
                 .toUriString();
 
         log.info("BFF chamando serviço de monitoramento em: {}", url);
