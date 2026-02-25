@@ -163,7 +163,6 @@ public class RadarsBFFService {
             LocalTime horaInicial,
             LocalTime horaFinal,
             String rodovia,
-            String praca,
             String km,
             String sentido,
             Pageable pageable
@@ -189,7 +188,7 @@ public class RadarsBFFService {
         List<CompletableFuture<RadarPageDTO>> futures = urlsParaChamar.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
                         () -> fetchLocalFromMicroservice(
-                                baseUrl, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable
+                                baseUrl, data, horaInicial, horaFinal, rodovia, km, sentido, pageable
                         ),
                         executorService
                 ))
@@ -206,7 +205,6 @@ public class RadarsBFFService {
             LocalTime horaInicial,
             LocalTime horaFinal,
             String rodovia,
-            String praca,
             String km,
             String sentido,
             Pageable pageable
@@ -221,7 +219,6 @@ public class RadarsBFFService {
                     .queryParam("horaInicial", horaInicial)
                     .queryParam("horaFinal", horaFinal)
                     .queryParam("rodovia", rodovia)
-                    .queryParam("praca", praca)
                     .queryParam("km", km)
                     .queryParam("sentido", sentido)
                     .queryParam("page", pageable.getPageNumber())
@@ -241,33 +238,37 @@ public class RadarsBFFService {
     // 3. GESTÃO DE RODOVIAS E KMs (NOVO)
     // ==================================================================================
 
-    @Cacheable(value = "lista-rodovias-bff")
-    public List<RodoviaDTO> listarRodovias() {
+    @Cacheable(value = "lista-rodovias-bff", key = "#concessionaria", unless = "#result == null")
+    public List<RodoviaDTO> listarRodovias(String concessionaria) {
         log.info("🔍 BFF: Solicitando lista de rodovias aos microserviços...");
 
-        // Tenta buscar de todos os serviços mapeados e agregar
-        List<RodoviaDTO> rodovias = fetchListFromAll("rodovias", RodoviaDTO.class);
-
-        if (rodovias.isEmpty()) {
-            log.warn("⚠️ Nenhuma rodovia encontrada em nenhum microserviço.");
+        if (concessionaria != null && !concessionaria.isEmpty()) {
+            // Busca apenas no microserviço solicitado (ex: 'eixo' ou 'cart')
+            String baseUrl = serviceUrlMap.get(concessionaria.toLowerCase());
+            if (baseUrl != null) {
+                String url = "http://" + baseUrl + "/radares/rodovias";
+                return executeCircuitBreakerListRequest("listRodovias", baseUrl, url, RodoviaDTO.class);
+            }
         }
-
-        return rodovias;
+        // Se não houver filtro, agrega todas (comportamento atual)
+        return fetchListFromAll("rodovias", RodoviaDTO.class);
     }
 
     @CacheEvict(value = "lista-rodovias-bff", allEntries = true)
-    public RodoviaDTO salvarRodovia(RodoviaDTO dto) {
+    public RodoviaDTO salvarRodovia(RodoviaDTO dto, String concessionaria) {
+        String key = (concessionaria != null && !concessionaria.isBlank()) ? concessionaria.toLowerCase() : "cart";
         // Envia para o serviço CART (assumindo que ele gerencia o domínio)
-        String baseUrl = serviceUrlMap.get("cart");
-        if (baseUrl == null) throw new IllegalStateException("Serviço CART não configurado para gestão de rodovias");
+        String baseUrl = serviceUrlMap.get(key);
+        if (baseUrl == null) throw new IllegalStateException("Serviço " + key + " não configurado para gestão de rodovias");
 
         String url = "http://" + baseUrl + "/radares/rodovias";
         return loadBalancedRestTemplate.postForObject(url, dto, RodoviaDTO.class);
     }
 
     @CacheEvict(value = "lista-rodovias-bff", allEntries = true)
-    public void deletarRodovia(Long id) {
-        String baseUrl = serviceUrlMap.get("cart");
+    public void deletarRodovia(Long id, String concessionaria) {
+        String key = (concessionaria != null && !concessionaria.isBlank()) ? concessionaria.toLowerCase() : "cart";
+        String baseUrl = serviceUrlMap.get(key);
         if (baseUrl != null) {
             loadBalancedRestTemplate.delete("http://" + baseUrl + "/radares/rodovias/" + id);
         }
@@ -275,23 +276,34 @@ public class RadarsBFFService {
 
     // --- KMs ---
 
-    public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId) {
-        String baseUrl = serviceUrlMap.get("cart");
-        if (baseUrl == null) return Collections.emptyList();
+    public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId, String concessionaria) {
+        // Se a concessionária vier preenchida, usa ela (em minúsculo). Se não, tenta a 'cart' como fallback legado.
+        String key = (concessionaria != null && !concessionaria.isBlank()) ? concessionaria.toLowerCase() : "cart";
 
+        String baseUrl = serviceUrlMap.get(key);
+
+        if (baseUrl == null) {
+            log.warn("⚠️ [BFF] Serviço não encontrado para a concessionária: {}", concessionaria);
+            return Collections.emptyList();
+        }
+
+        log.info("📍 [BFF] Roteando busca de KMs da rodovia {} para o serviço: {}", rodoviaId, baseUrl);
         String url = "http://" + baseUrl + "/radares/rodovias/" + rodoviaId + "/kms";
         return executeCircuitBreakerListRequest("listarKms", baseUrl, url, KmRodoviaDTO.class);
     }
 
-    public KmRodoviaDTO salvarKm(KmRodoviaDTO dto) {
-        String baseUrl = serviceUrlMap.get("cart");
-        if (baseUrl == null) throw new IllegalStateException("Serviço CART não disponível");
+    public KmRodoviaDTO salvarKm(KmRodoviaDTO dto, String concessionaria) {
+        // Se a concessionária vier preenchida, usa ela (em minúsculo). Se não, tenta a 'cart' como fallback legado.
+        String key = (concessionaria != null && !concessionaria.isBlank()) ? concessionaria.toLowerCase() : "cart";
+        String baseUrl = serviceUrlMap.get(key);
+        if (baseUrl == null) throw new IllegalStateException("Serviço " + key + " não disponível");
 
         return loadBalancedRestTemplate.postForObject("http://" + baseUrl + "/radares/kms", dto, KmRodoviaDTO.class);
     }
 
-    public void deletarKm(Long id) {
-        String baseUrl = serviceUrlMap.get("cart");
+    public void deletarKm(Long id, String concessionaria) {
+        String key = (concessionaria != null && !concessionaria.isBlank()) ? concessionaria.toLowerCase() : "cart";
+        String baseUrl = serviceUrlMap.get(key);
         if (baseUrl != null) {
             loadBalancedRestTemplate.delete("http://" + baseUrl + "/radares/kms/" + id);
         }

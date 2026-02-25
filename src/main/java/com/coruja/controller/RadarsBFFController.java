@@ -80,7 +80,6 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             @RequestParam(required = false) String rodovia,
-            @RequestParam(required = false) String praca,
             @RequestParam(required = false) String km,
             @RequestParam(required = false) String sentido,
             @PageableDefault(size = 20) Pageable pageable
@@ -89,7 +88,7 @@ public class RadarsBFFController {
 
         return ResponseEntity.ok(radarsBFFService.buscarPorLocal(
                 concessionaria, // Passando a lista para o service
-                data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable
+                data, horaInicial, horaFinal, rodovia, km, sentido, pageable
         ));
     }
 
@@ -224,25 +223,32 @@ public class RadarsBFFController {
 
     @GetMapping("/rodovias")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<List<RodoviaDTO>> listarRodovias() {
-        log.info("🛣️ [BFF] Listando rodovias");
+    public ResponseEntity<List<RodoviaDTO>> listarRodovias(
+            @RequestParam(required = false) String concessionaria
+    ) {
+        log.info("🛣️ [BFF] Listando rodovias. Filtro concessionária: {}",
+                concessionaria != null ? concessionaria : "Todas");
+
+        // Passa o filtro para o service, que decidirá qual microserviço chamar
+        List<RodoviaDTO> rodovias = radarsBFFService.listarRodovias(concessionaria);
+
         return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(1, TimeUnit.HOURS)) // Cache no navegador
-                .body(radarsBFFService.listarRodovias());
+                .cacheControl(CacheControl.maxAge(1, TimeUnit.HOURS)) // Mantém o cache no navegador
+                .body(rodovias);
     }
 
     @PostMapping("/rodovias")
     @PreAuthorize("hasRole('ADMIN')") // Apenas Admin pode criar
-    public ResponseEntity<RodoviaDTO> adicionarRodovia(@RequestBody RodoviaDTO rodovia) {
-        log.info("🛣️ [BFF] Adicionando rodovia: {}", rodovia.getNome());
-        return ResponseEntity.ok(radarsBFFService.salvarRodovia(rodovia));
+    public ResponseEntity<RodoviaDTO> adicionarRodovia(@RequestBody RodoviaDTO rodovia, @RequestParam(required = false) String concessionaria) {
+        log.info("🛣️ [BFF] Adicionando rodovia: {}, concessionária: {}", rodovia.getNome(), concessionaria);
+        return ResponseEntity.ok(radarsBFFService.salvarRodovia(rodovia, concessionaria));
     }
 
     @DeleteMapping("/rodovias/{id}")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<Void> removerRodovia(@PathVariable Long id) {
-        log.info("🗑️ [BFF] Removendo rodovia ID: {}", id);
-        radarsBFFService.deletarRodovia(id);
+    public ResponseEntity<Void> removerRodovia(@PathVariable Long id, @RequestParam(required = false) String concessionaria) {
+        log.info("🗑️ [BFF] Removendo rodovia ID: {}, concessionária: {}", id, concessionaria);
+        radarsBFFService.deletarRodovia(id, concessionaria);
         return ResponseEntity.noContent().build();
     }
 
@@ -250,22 +256,24 @@ public class RadarsBFFController {
 
     @GetMapping("/rodovias/{rodoviaId}/kms")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<List<KmRodoviaDTO>> listarKms(@PathVariable Long rodoviaId) {
+    public ResponseEntity<List<KmRodoviaDTO>> listarKms(@PathVariable Long rodoviaId, @RequestParam(required = false) String concessionaria) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
-                .body(radarsBFFService.listarKmsPorRodovia(rodoviaId));
+                .body(radarsBFFService.listarKmsPorRodovia(rodoviaId, concessionaria));
     }
 
     @PostMapping("/kms")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<KmRodoviaDTO> adicionarKm(@RequestBody KmRodoviaDTO km) {
-        return ResponseEntity.ok(radarsBFFService.salvarKm(km));
+    public ResponseEntity<KmRodoviaDTO> adicionarKm(@RequestBody KmRodoviaDTO km, @RequestParam(required = false) String concessionaria) {
+        log.info("➕ [BFF] Adicionando KM na concessionária: {}", concessionaria);
+        return ResponseEntity.ok(radarsBFFService.salvarKm(km, concessionaria));
     }
 
     @DeleteMapping("/kms/{id}")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<Void> removerKm(@PathVariable Long id) {
-        radarsBFFService.deletarKm(id);
+    public ResponseEntity<Void> removerKm(@PathVariable Long id, @RequestParam(required = false) String concessionaria) {
+        log.info("🗑️ [BFF] Removendo KM ID: {} da concessionária: {}", id, concessionaria);
+        radarsBFFService.deletarKm(id, concessionaria);
         return ResponseEntity.noContent().build();
     }
 }
