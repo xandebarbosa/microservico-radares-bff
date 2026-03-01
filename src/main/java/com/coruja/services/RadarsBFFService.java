@@ -93,7 +93,7 @@ public class RadarsBFFService {
         // Por padrão, o Eureka registra os nomes em MAIÚSCULAS.
         serviceUrlMap.put("cart", "MICROSERVICO-RADARES-CART");
         serviceUrlMap.put("eixo", "MICROSERVICO-RADARES-EIXO");
-        //serviceUrlMap.put("entrevias", "MICROSERVICO-RADARES-ENTREVIAS");
+        serviceUrlMap.put("entrevias", "MICROSERVICO-RADARES-ENTREVIAS");
         //serviceUrlMap.put("rondon", "MICROSERVICO-RADARES-RONDON");
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
