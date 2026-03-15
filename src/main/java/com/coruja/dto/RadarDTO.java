@@ -11,7 +11,7 @@ import java.util.Date;
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class RadarDTO {
-    private Long id;
+    private String id;
 
     @JsonFormat(pattern = "yyyy-MM-dd")
     private LocalDate data;

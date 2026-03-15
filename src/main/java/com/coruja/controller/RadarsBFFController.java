@@ -140,7 +140,7 @@ public class RadarsBFFController {
     ) {
         log.info("💾 Exportando dados com filtros");
         List<RadarDTO> result = radarsBFFService.buscarTodosParaExportacao(
-                concessionaria, placa, rodovia, km, sentido, praca, data, horaInicial, horaFinal
+                concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
         );
         return ResponseEntity.ok(result);
     }

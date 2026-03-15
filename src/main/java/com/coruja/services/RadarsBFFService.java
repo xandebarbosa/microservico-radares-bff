@@ -15,6 +15,8 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.client.RestTemplate;
@@ -94,7 +96,8 @@ public class RadarsBFFService {
         serviceUrlMap.put("cart", "MICROSERVICO-RADARES-CART");
         serviceUrlMap.put("eixo", "MICROSERVICO-RADARES-EIXO");
         serviceUrlMap.put("entrevias", "MICROSERVICO-RADARES-ENTREVIAS");
-        //serviceUrlMap.put("rondon", "MICROSERVICO-RADARES-RONDON");
+        serviceUrlMap.put("rondon", "MICROSERVICO-RADARES-RONDON");
+        serviceUrlMap.put("monitorasp", "MICROSERVICO-RADARES-MONITORASP");
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
 
@@ -525,37 +528,57 @@ public class RadarsBFFService {
         });
     }
 
-    private RadarPageDTO executeCircuitBreakerRequestBuscaPorLocal(
-            String cbName,
-            String baseUrl,
-            String url
-    ) {
+    private RadarPageDTO executeCircuitBreakerRequestBuscaPorLocal(String cbName, String baseUrl, String url) {
         CircuitBreaker cb = circuitBreakerFactory.create(cbName);
 
         return cb.run(() -> {
             try {
                 log.info("📡 [BFF Local] Chamando: {}", url);
-                // Busca local geralmente retorna RadarPageDTO diretamente
-                ResponseEntity<RadarPageDTO> response = loadBalancedRestTemplate.getForEntity(
-                        url,
-                        RadarPageDTO.class
-                );
 
-                RadarPageDTO body = response.getBody();
+                // Pede diretamente um JsonNode (Árvore JSON flexível do Jackson)
+                ResponseEntity<com.fasterxml.jackson.databind.JsonNode> response =
+                        loadBalancedRestTemplate.getForEntity(url, com.fasterxml.jackson.databind.JsonNode.class);
 
-                if (body == null) {
-                    log.warn("⚠️ [BFF Local] Resposta nula de {}", baseUrl);
+                com.fasterxml.jackson.databind.JsonNode root = response.getBody();
+
+                if (root == null || root.isEmpty()) {
                     return new RadarPageDTO(new ArrayList<>(), new PageMetadata(0, 0, 0, 0));
                 }
 
-                log.info("✅ [BFF Local] Sucesso: {} registros de {}",
-                        body.getContent() != null ? body.getContent().size() : 0, baseUrl);
+                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+                mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-                return body;
+                // Pega o array "content" do JSON
+                com.fasterxml.jackson.databind.JsonNode contentNode = root.get("content");
+                List<RadarDTO> content = new ArrayList<>();
+                if (contentNode != null && contentNode.isArray()) {
+                    content = mapper.convertValue(contentNode, new com.fasterxml.jackson.core.type.TypeReference<List<RadarDTO>>() {});
+                }
+
+                // Captura os metadados tolerando ambos os formatos (Spring e Quarkus)
+                int number = 0, size = 20, totalPages = 0;
+                long totalElements = 0;
+
+                if (root.has("page") && root.get("page").isObject()) {
+                    com.fasterxml.jackson.databind.JsonNode pageNode = root.get("page");
+                    if(pageNode.has("number")) number = pageNode.get("number").asInt();
+                    if(pageNode.has("size")) size = pageNode.get("size").asInt();
+                    if(pageNode.has("totalPages")) totalPages = pageNode.get("totalPages").asInt();
+                    if(pageNode.has("totalElements")) totalElements = pageNode.get("totalElements").asLong();
+                } else {
+                    if(root.has("number")) number = root.get("number").asInt();
+                    if(root.has("size")) size = root.get("size").asInt();
+                    if(root.has("totalPages")) totalPages = root.get("totalPages").asInt();
+                    if(root.has("totalElements")) totalElements = root.get("totalElements").asLong();
+                }
+
+                log.info("✅ [BFF Local] Sucesso: {} registros de {}", content.size(), baseUrl);
+                return new RadarPageDTO(content, new PageMetadata(number, size, totalElements, totalPages));
 
             } catch (Exception e) {
                 log.error("❌ [BFF Local] Erro ao chamar {}: {}", url, e.getMessage());
-                throw e; // Lança para ativar o fallback do Circuit Breaker
+                throw new RuntimeException(e);
             }
         }, throwable -> {
             log.warn("⚠️ [BFF Local] Fallback para {}: {}", baseUrl, throwable.getMessage());
@@ -738,41 +761,69 @@ public class RadarsBFFService {
      * Se estiver vazio (ex: após restart), busca do Banco de Dados via API Monitoramento.
      */
     public List<RadarDTO> getUltimosRadaresProcessados() {
-        // 1. Tenta pegar do cache em tempo real (dados chegando agora)
-        List<RadarDTO> fromMemory = new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
+        // 1. Pega os dados que chegaram agora em tempo real (RabbitMQ)
+        List<RadarDTO> ultimos = new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
 
-        if (!fromMemory.isEmpty()) {
-            return fromMemory;
-        }
+        // 2. SEMPRE busca do banco/microsserviços para trazer dados consolidados (Rondon)
+        List<RadarDTO> doBanco = fetchUltimosFromDatabase();
+
+        // 3. Junta as duas listas
+        ultimos.addAll(doBanco);
 
         // 2. Se a memória estiver vazia, busca os últimos do histórico no Banco de Dados
         log.info("Cache de memória vazio. Buscando últimos registros no Banco de Dados...");
-        return fetchUltimosFromDatabase();
+        // 4. Remove nulos, ordena pelos mais recentes absolutos e corta os 10 primeiros
+        return ultimos.stream()
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
+                        .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())))
+                .limit(10)
+                .collect(Collectors.toList());
     }
 
     private List<RadarDTO> fetchUltimosFromDatabase() {
-        // Endpoint que criamos/sugerimos no MonitoramentoController
-        String url = getMonitoramentoUrl("/api/monitoramento/ultimos");
+        List<RadarDTO> todosUltimos = new ArrayList<>();
 
+        // 1. Busca do Monitoramento (Legado: Cart, Eixo, Entrevias)
+        String urlMonitoramento = getMonitoramentoUrl("/api/monitoramento/ultimos");
         try {
-            // Usa o 'currentRestTemplate' para garantir a conexão correta (IP ou Eureka)
-            ResponseEntity<List<RadarDTO>> response = monitoramentoRestTemplate.exchange(
-                    url,
+            ResponseEntity<List<RadarDTO>> responseMon = monitoramentoRestTemplate.exchange(
+                    urlMonitoramento,
                     HttpMethod.GET,
                     null,
                     new ParameterizedTypeReference<List<RadarDTO>>() {}
             );
-
-            List<RadarDTO> result = response.getBody();
-            if (result != null) {
-                log.info("Recuperados {} registros do histórico.", result.size());
-                return result;
+            if (responseMon.getBody() != null) {
+                todosUltimos.addAll(responseMon.getBody());
+                log.info("Recuperados {} registros do histórico (Monitoramento).", responseMon.getBody().size());
             }
         } catch (Exception e) {
-            log.error("Falha ao buscar histórico de radares no Monitoramento: {}", e.getMessage());
+            log.error("Falha ao buscar histórico no Monitoramento: {}", e.getMessage());
         }
 
-        return Collections.emptyList();
+        // 2. Busca direto do Rondon (Novo microsserviço)
+        String baseUrlRondon = serviceUrlMap.get("rondon");
+        if (baseUrlRondon != null) {
+            try {
+                String urlRondon = "http://" + baseUrlRondon + "/radares/ultimos?limite=10";
+                // Dica: O uso de Array (RadarDTO[]) evita erros de casting com o Jackson
+                ResponseEntity<RadarDTO[]> responseRondon = loadBalancedRestTemplate.getForEntity(urlRondon, RadarDTO[].class);
+                if (responseRondon.getBody() != null) {
+                    todosUltimos.addAll(Arrays.asList(responseRondon.getBody()));
+                    log.info("Recuperados {} registros direto da Rondon.", responseRondon.getBody().length);
+                }
+            } catch (Exception e) {
+                log.warn("⚠️ Falha ao buscar últimos registros direto da Rondon: {}", e.getMessage());
+            }
+        }
+
+        // 3. Mescla tudo, ordena do mais recente para o mais antigo e corta os 10 primeiros
+        return todosUltimos.stream()
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparing(RadarDTO::getData, Comparator.nullsLast(Comparator.reverseOrder()))
+                        .thenComparing(RadarDTO::getHora, Comparator.nullsLast(Comparator.reverseOrder())))
+                .limit(10)
+                .collect(Collectors.toList());
     }
 
 
@@ -781,73 +832,95 @@ public class RadarsBFFService {
     // MÉTODOS PRIVADOS AUXILIARES
     // =========================================================================
 
-
-
     /**
      * Busca todas as páginas de um microserviço (para exportação).
+     * Inteligente: Suporta tanto o formato RestPage quanto RadarPageDTO.
      */
     private List<RadarDTO> fetchAllPagesFromMicroservice(
-            String baseUrl,
-            String placa,
-            String praca,
-            String rodovia,
-            String km,
-            String sentido,
-            LocalDate data,
-            LocalTime horaInicial,
-            LocalTime horaFinal
+            String baseUrl, String placa, String praca, String rodovia, String km,
+            String sentido, LocalDate data, LocalTime horaInicial, LocalTime horaFinal
     ) {
         List<RadarDTO> allRadars = new ArrayList<>();
         int pageNumber = 0;
         final int pageSize = 1000;
         boolean hasMorePages = true;
 
+        // Leitor universal de JSON para tolerar Quarkus e Spring
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+        mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
         while (hasMorePages) {
-            // ✅ CORREÇÃO: Endpoint correto é /busca-local se tiver data, ou /busca-placa se tiver placa
-            // Lógica simplificada: Se tem placa, usa busca-placa. Se tem data, busca-local.
-            String endpoint = (placa != null && !placa.isBlank()) ? "/radares/busca-placa" : "/radares/busca-local";
+            boolean isBuscaPorPlaca = (placa != null && !placa.isBlank());
+            String endpoint = isBuscaPorPlaca ? "/radares/busca-placa" : "/radares/busca-local";
 
             UriComponentsBuilder uriBuilder = UriComponentsBuilder
                     .fromUriString("http://" + baseUrl + endpoint)
                     .queryParam("page", pageNumber)
                     .queryParam("size", pageSize);
 
-            if (placa != null && !placa.isBlank()) uriBuilder.queryParam("placa", placa);
-            else {
-                // Filtros de Local
+            if (isBuscaPorPlaca) {
+                uriBuilder.queryParam("placa", placa);
+            } else {
                 if (data != null) uriBuilder.queryParam("data", data);
                 if (rodovia != null) uriBuilder.queryParam("rodovia", rodovia);
-                if (praca != null) uriBuilder.queryParam("praca", praca);
                 if (km != null) uriBuilder.queryParam("km", km);
                 if (sentido != null) uriBuilder.queryParam("sentido", sentido);
                 if (horaInicial != null) uriBuilder.queryParam("horaInicial", horaInicial);
                 if (horaFinal != null) uriBuilder.queryParam("horaFinal", horaFinal);
             }
 
-            try {
-                // ✅ CORREÇÃO: Usando RestPage para exportação também
-                ResponseEntity<RestPage<RadarDTO>> response = loadBalancedRestTemplate.exchange(
-                        uriBuilder.toUriString(),
-                        HttpMethod.GET,
-                        null,
-                        new ParameterizedTypeReference<RestPage<RadarDTO>>() {}
-                );
+            // O pulo do gato: Voltar a utilizar String em vez de URI para o LoadBalancer funcionar
+            String url = uriBuilder.toUriString();
+            log.info("📡 [Exportação] Chamando: {}", url);
 
-                RestPage<RadarDTO> page = response.getBody();
-                if (page != null && !page.getContent().isEmpty()) {
-                    allRadars.addAll(page.getContent());
+            try {
+                // Utilizando getForEntity com String garante o mesmo comportamento de sucesso da Busca por Local
+                ResponseEntity<com.fasterxml.jackson.databind.JsonNode> response =
+                        loadBalancedRestTemplate.getForEntity(url, com.fasterxml.jackson.databind.JsonNode.class);
+
+                com.fasterxml.jackson.databind.JsonNode root = response.getBody();
+
+                if (root == null || root.isEmpty()) {
+                    log.warn("⚠️ [Exportação] Retorno vazio ou nulo de {}", baseUrl);
+                    hasMorePages = false;
+                    continue;
+                }
+
+                com.fasterxml.jackson.databind.JsonNode contentNode = root.get("content");
+
+                if (contentNode != null && contentNode.isArray()) {
+                    if (contentNode.size() > 0) {
+                        List<RadarDTO> currentContent = mapper.convertValue(
+                                contentNode,
+                                new com.fasterxml.jackson.core.type.TypeReference<List<RadarDTO>>() {}
+                        );
+                        allRadars.addAll(currentContent);
+                        log.info("✅ [Exportação] Recebidos {} registros da página {} de {}", currentContent.size(), pageNumber, baseUrl);
+                    } else {
+                        log.info("⚠️ [Exportação] Página {} de {} sem registros.", pageNumber, baseUrl);
+                    }
+
+                    int totalPages = 0;
+                    if (root.has("page") && root.get("page").has("totalPages")) {
+                        totalPages = root.get("page").get("totalPages").asInt(); // Formato Quarkus
+                    } else if (root.has("totalPages")) {
+                        totalPages = root.get("totalPages").asInt(); // Formato Spring
+                    }
+
                     pageNumber++;
-                    hasMorePages = pageNumber < page.getTotalPages();
+                    hasMorePages = pageNumber < totalPages;
                 } else {
+                    log.warn("⚠️ [Exportação] Chave 'content' não encontrada no JSON de {}", baseUrl);
                     hasMorePages = false;
                 }
             } catch (Exception e) {
-                log.error("Erro na exportação de {}: {}", baseUrl, e.getMessage());
+                log.error("❌ [Exportação] Erro ao chamar {}: {}", baseUrl, e.getMessage());
                 hasMorePages = false;
             }
         }
 
-        log.info("Buscadas {} páginas de {} com {} registros", pageNumber, baseUrl, allRadars.size());
+        log.info("🏁 Exportação concluída: Buscadas {} páginas de {} com um total de {} registros", pageNumber, baseUrl, allRadars.size());
         return allRadars;
     }
 
@@ -972,4 +1045,83 @@ public class RadarsBFFService {
         );
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    //  ATUALIZAÇÃO AUTOMÁTICA DA RONDON (POLLING)
+    // ═══════════════════════════════════════════════════════════════
+
+    // Injeta o disparador de mensagens WebSocket nativo do Spring
+    private SimpMessagingTemplate messagingTemplate;
+
+    // Guarda o ID do último radar que vimos para não enviar coisas repetidas para a tela
+    private String ultimoIdRondonEnviado = "";
+
+    /**
+     * Executa automaticamente a cada 1 minutos (60000 milissegundos).
+     * Espia o MongoDB da Rondon. Se tiver novidade, empurra para o FrontEnd.
+     */
+    @Scheduled(fixedDelay = 60000)
+    public void atualizarRondonNoPainel() {
+        String baseUrlRondon = serviceUrlMap.get("rondon");
+        if (baseUrlRondon == null) return; // Só executa se a Rondon estiver no mapa
+
+        try {
+            // Busca apenas o radar mais recente de todos (limite=1) para poupar memória e rede
+            String url = "http://" + baseUrlRondon + "/radares/ultimos?limite=1";
+            ResponseEntity<RadarDTO[]> response = loadBalancedRestTemplate.getForEntity(url, RadarDTO[].class);
+
+            if (response.getBody() != null && response.getBody().length > 0) {
+                RadarDTO maisRecente = response.getBody()[0];
+                String idAtual = String.valueOf(maisRecente.getId());
+
+                // Se o ID for diferente do último que enviamos, significa que há uma passagem nova!
+                if (!idAtual.equals(ultimoIdRondonEnviado)) {
+                    ultimoIdRondonEnviado = idAtual;
+
+                    log.info("⏰ [Scheduler] Nova passagem da Rondon detectada (Placa: {}). Atualizando FrontEnd...", maisRecente.getPlaca());
+
+                    // Dispara a mensagem para o tópico WebSocket que o seu React já está a escutar
+                    messagingTemplate.convertAndSend("/topic/last-radar", maisRecente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da Rondon para verificação...");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  ATUALIZAÇÃO AUTOMÁTICA DO MONITORASP (POLLING)
+    // ═══════════════════════════════════════════════════════════════
+    private String ultimoIdMonitoraSPEnviado = "";
+    /**
+     * Executa automaticamente a cada 1 minutos (60000 milissegundos).
+     * Espia o MongoDB da Rondon. Se tiver novidade, empurra para o FrontEnd.
+     */
+    @Scheduled(fixedDelay = 60000)
+    public void atualizarMonitoraSPNoPainel() {
+        String baseUrlMonitoraSP = serviceUrlMap.get("monitorasp");
+        if (baseUrlMonitoraSP == null) return; // Só executa se a MonitoraSP estiver no mapa
+
+        try {
+            // Busca apenas o radar mais recente de todos (limite=1) para poupar memória e rede
+            String url = "http://" + baseUrlMonitoraSP + "/radares/ultimos?limite=1";
+            ResponseEntity<RadarDTO[]> response = loadBalancedRestTemplate.getForEntity(url, RadarDTO[].class);
+
+            if (response.getBody() != null && response.getBody().length > 0) {
+                RadarDTO maisRecente = response.getBody()[0];
+                String idAtual = String.valueOf(maisRecente.getId());
+
+                // Se o ID for diferente do último que enviamos, significa que há uma passagem nova!
+                if (!idAtual.equals(ultimoIdMonitoraSPEnviado)) {
+                    ultimoIdMonitoraSPEnviado = idAtual;
+
+                    log.info("⏰ [Scheduler] Nova passagem da MonitoraSP detectada (Placa: {}). Atualizando FrontEnd...", maisRecente.getPlaca());
+
+                    // Dispara a mensagem para o tópico WebSocket que o seu React já está a escutar
+                    messagingTemplate.convertAndSend("/topic/last-radar", maisRecente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade do MonitoraSP para verificação...");
+        }
+    }
 }
