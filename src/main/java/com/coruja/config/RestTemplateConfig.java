@@ -51,9 +51,15 @@ public class RestTemplateConfig {
     // Método auxiliar para não duplicar configuração
     private RestTemplate createRestTemplate() {
         RestTemplate restTemplate = new RestTemplate(clientHttpRequestFactory());
-        MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
-        converter.setObjectMapper(objectMapper());
-        restTemplate.setMessageConverters(List.of(converter));
+
+        MappingJackson2HttpMessageConverter jacksonConverter =
+                new MappingJackson2HttpMessageConverter();
+        jacksonConverter.setObjectMapper(objectMapper());
+
+        // CORRETO: adiciona Jackson no início mantendo os outros converters
+        // (StringHttpMessageConverter, ByteArrayHttpMessageConverter, etc.)
+        restTemplate.getMessageConverters().addFirst(jacksonConverter);
+
         return restTemplate;
     }
 

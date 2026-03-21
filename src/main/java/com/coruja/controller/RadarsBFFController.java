@@ -12,6 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.HttpClientErrorException;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -27,8 +28,6 @@ public class RadarsBFFController {
 
     private final RadarsBFFService radarsBFFService;
 
-
-
     /**
      * ✅ BUSCA POR PLACA (Histórico Completo)
      * Substitui o antigo /placa/{placa} para padronizar query params.
@@ -39,22 +38,33 @@ public class RadarsBFFController {
             @RequestParam String placa,
             @PageableDefault(size = 20) Pageable pageable
     ) {
-        try {
-            // Sanitização simples
-            String termoBusca = (placa != null) ? placa.trim().toUpperCase() : "";
-
-            log.info("📍 [BFF] Buscando histórico completo para placa: {}", termoBusca);
-            return ResponseEntity.ok(radarsBFFService.buscarPorPlaca(termoBusca, pageable));
-        } catch (Exception e) {
-            log.error("🔥 Erro ao processar busca por placa: {}", e.getMessage());
-            // Retorna um DTO de página vazio em vez de uma String
-            RadarPageDTO emptyPage = new RadarPageDTO();
-            emptyPage.setContent(Collections.emptyList());
-            // Configure metadados de página zerados se necessário
-
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+        if (placa == null || placa.isBlank()) {
+            return ResponseEntity.badRequest().build();
         }
 
+        String termoBusca = placa.trim().toUpperCase();
+        log.info("📍 [BFF] Buscando histórico completo para placa: {}", termoBusca);
+
+        RadarPageDTO emptyPage = new RadarPageDTO();
+        emptyPage.setContent(Collections.emptyList());
+
+        try {
+            return ResponseEntity.ok(radarsBFFService.buscarPorPlaca(termoBusca, pageable));
+
+        } catch (HttpClientErrorException e) {
+            log.warn("⚠️ [BFF] Erro HTTP {}: {}", e.getStatusCode(), e.getMessage());
+
+            // .value() == 404 evita problema de tipo HttpStatusCode vs HttpStatus
+            HttpStatus status = e.getStatusCode().value() == 404
+                    ? HttpStatus.NOT_FOUND
+                    : HttpStatus.SERVICE_UNAVAILABLE;
+
+            return ResponseEntity.status(status).body(emptyPage);
+
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao processar busca por placa: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+        }
     }
 
 
@@ -75,8 +85,8 @@ public class RadarsBFFController {
     @GetMapping("/busca-local")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<RadarPageDTO> buscarPorLocal(
-            @RequestParam(required = false) List<String> concessionaria, // Parâmetro adicionado
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam(required = false) List<String> concessionaria,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             @RequestParam(required = false) String rodovia,
@@ -84,12 +94,18 @@ public class RadarsBFFController {
             @RequestParam(required = false) String sentido,
             @PageableDefault(size = 20) Pageable pageable
     ) {
-        log.info("🔍 [BFF] Buscando Local | Concessionárias: {} | Data: {} | Rodovia: {}", concessionaria, data, rodovia);
-
-        return ResponseEntity.ok(radarsBFFService.buscarPorLocal(
-                concessionaria, // Passando a lista para o service
-                data, horaInicial, horaFinal, rodovia, km, sentido, pageable
-        ));
+        log.info("🔍 [BFF] Buscando Local | Concessionárias: {} | Data: {} | Rodovia: {}",
+                concessionaria, data, rodovia);
+        try {
+            return ResponseEntity.ok(radarsBFFService.buscarPorLocal(
+                    concessionaria, data, horaInicial, horaFinal, rodovia, km, sentido, pageable
+            ));
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao buscar por local: {}", e.getMessage());
+            RadarPageDTO emptyPage = new RadarPageDTO();
+            emptyPage.setContent(Collections.emptyList());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+        }
     }
 
     /**
@@ -139,10 +155,16 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal
     ) {
         log.info("💾 Exportando dados com filtros");
-        List<RadarDTO> result = radarsBFFService.buscarTodosParaExportacao(
-                concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
-        );
-        return ResponseEntity.ok(result);
+        try {
+            List<RadarDTO> result = radarsBFFService.buscarTodosParaExportacao(
+                    concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
+            );
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao exportar dados: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Collections.emptyList());
+        }
     }
 
     /**
@@ -161,10 +183,17 @@ public class RadarsBFFController {
             Pageable pageable
     ) {
         log.info("🌍 Buscando por geolocalização: Latitude={}, Longitude={}, Raio={}m", latitude, longitude, raio);
-        RadarPageDTO result = radarsBFFService.buscarPorGeolocalizacao(
-                latitude, longitude, raio, data, horaInicio, horaFim, pageable
-        );
-        return ResponseEntity.ok(result);
+        try {
+            RadarPageDTO result = radarsBFFService.buscarPorGeolocalizacao(
+                    latitude, longitude, raio, data, horaInicio, horaFim, pageable
+            );
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro na busca geoespacial: {}", e.getMessage());
+            RadarPageDTO emptyPage = new RadarPageDTO();
+            emptyPage.setContent(Collections.emptyList());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+        }
     }
 
     /**
@@ -175,12 +204,17 @@ public class RadarsBFFController {
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
     public ResponseEntity<List<RadarLocationDTO>> getRadarLocations() {
         log.info("🌍 [BFF] Buscando todas as localizações de radares para o mapa");
-        List<RadarLocationDTO> locations = radarsBFFService.getAllRadarLocations();
-
-        // Cacheia no navegador por 1 hora, já que a localização dos radares raramente muda
-        return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
-                .body(locations);
+        try {
+            List<RadarLocationDTO> locations = radarsBFFService.getAllRadarLocations();
+            return ResponseEntity.ok()
+                    .cacheControl(CacheControl.maxAge(5, TimeUnit.HOURS))
+                    .body(locations);
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao buscar localizações: {}", e.getMessage());
+            return ResponseEntity.ok()
+                    .cacheControl(CacheControl.noStore())
+                    .body(Collections.emptyList());
+        }
     }
 
     /**
@@ -198,10 +232,16 @@ public class RadarsBFFController {
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFim
     ) {
         log.info("💾 Exportando dados GEO: Lat={}, Long={}, Raio={}m", latitude, longitude, raio);
-        List<RadarDTO> result = radarsBFFService.buscarTodosPorGeolocalizacaoParaExportacao(
-                latitude, longitude, raio, data, horaInicio, horaFim
-        );
-        return ResponseEntity.ok(result);
+        try {
+            List<RadarDTO> result = radarsBFFService.buscarTodosPorGeolocalizacaoParaExportacao(
+                    latitude, longitude, raio, data, horaInicio, horaFim
+            );
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao exportar dados GEO: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Collections.emptyList());
+        }
     }
 
     /**
@@ -228,52 +268,89 @@ public class RadarsBFFController {
     ) {
         log.info("🛣️ [BFF] Listando rodovias. Filtro concessionária: {}",
                 concessionaria != null ? concessionaria : "Todas");
-
-        // Passa o filtro para o service, que decidirá qual microserviço chamar
-        List<RodoviaDTO> rodovias = radarsBFFService.listarRodovias(concessionaria);
-
-        return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(1, TimeUnit.HOURS)) // Mantém o cache no navegador
-                .body(rodovias);
+        try {
+            List<RodoviaDTO> rodovias = radarsBFFService.listarRodovias(concessionaria);
+            return ResponseEntity.ok()
+                    .cacheControl(CacheControl.maxAge(1, TimeUnit.HOURS))
+                    .body(rodovias);
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao listar rodovias: {}", e.getMessage());
+            return ResponseEntity.ok()
+                    .cacheControl(CacheControl.noStore()) // não cacheia resposta de erro
+                    .body(Collections.emptyList());
+        }
     }
 
     @PostMapping("/rodovias")
     @PreAuthorize("hasRole('ADMIN')") // Apenas Admin pode criar
-    public ResponseEntity<RodoviaDTO> adicionarRodovia(@RequestBody RodoviaDTO rodovia, @RequestParam(required = false) String concessionaria) {
+    public ResponseEntity<RodoviaDTO> adicionarRodovia(
+            @RequestBody RodoviaDTO rodovia,
+            @RequestParam(required = false) String concessionaria) {
         log.info("🛣️ [BFF] Adicionando rodovia: {}, concessionária: {}", rodovia.getNome(), concessionaria);
-        return ResponseEntity.ok(radarsBFFService.salvarRodovia(rodovia, concessionaria));
+        try {
+            return ResponseEntity.ok(radarsBFFService.salvarRodovia(rodovia, concessionaria));
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao adicionar rodovia: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
     }
 
     @DeleteMapping("/rodovias/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Void> removerRodovia(@PathVariable Long id, @RequestParam(required = false) String concessionaria) {
         log.info("🗑️ [BFF] Removendo rodovia ID: {}, concessionária: {}", id, concessionaria);
-        radarsBFFService.deletarRodovia(id, concessionaria);
-        return ResponseEntity.noContent().build();
+        try {
+            radarsBFFService.deletarRodovia(id, concessionaria);
+            return ResponseEntity.noContent().build();
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao remover rodovia {}: {}", id, e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
     }
 
     // --- KMs ---
 
     @GetMapping("/rodovias/{rodoviaId}/kms")
     @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
-    public ResponseEntity<List<KmRodoviaDTO>> listarKms(@PathVariable Long rodoviaId, @RequestParam(required = false) String concessionaria) {
-        return ResponseEntity.ok()
-                .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
-                .body(radarsBFFService.listarKmsPorRodovia(rodoviaId, concessionaria));
+    public ResponseEntity<List<KmRodoviaDTO>> listarKms(
+            @PathVariable Long rodoviaId,
+            @RequestParam(required = false) String concessionaria) {
+        try {
+            return ResponseEntity.ok()
+                    .cacheControl(CacheControl.maxAge(30, TimeUnit.MINUTES))
+                    .body(radarsBFFService.listarKmsPorRodovia(rodoviaId, concessionaria));
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao listar KMs da rodovia {}: {}", rodoviaId, e.getMessage());
+            return ResponseEntity.ok()
+                    .cacheControl(CacheControl.noStore())
+                    .body(Collections.emptyList());
+        }
     }
 
     @PostMapping("/kms")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<KmRodoviaDTO> adicionarKm(@RequestBody KmRodoviaDTO km, @RequestParam(required = false) String concessionaria) {
+    public ResponseEntity<KmRodoviaDTO> adicionarKm(
+            @RequestBody KmRodoviaDTO km,
+            @RequestParam(required = false) String concessionaria) {
         log.info("➕ [BFF] Adicionando KM na concessionária: {}", concessionaria);
-        return ResponseEntity.ok(radarsBFFService.salvarKm(km, concessionaria));
+        try {
+            return ResponseEntity.ok(radarsBFFService.salvarKm(km, concessionaria));
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao adicionar KM: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
     }
 
     @DeleteMapping("/kms/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Void> removerKm(@PathVariable Long id, @RequestParam(required = false) String concessionaria) {
         log.info("🗑️ [BFF] Removendo KM ID: {} da concessionária: {}", id, concessionaria);
-        radarsBFFService.deletarKm(id, concessionaria);
-        return ResponseEntity.noContent().build();
+        try {
+            radarsBFFService.deletarKm(id, concessionaria);
+            return ResponseEntity.noContent().build();
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao remover KM {}: {}", id, e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
     }
 }
