@@ -1,6 +1,7 @@
 package com.coruja.services;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
@@ -18,6 +19,9 @@ public class AnaliseBFFService {
 
     @Autowired
     private RestTemplate loadBalancedRestTemplate;
+
+    @Autowired
+    private DetranService detranService;
 
     private static final String ANALISE_SERVICE_NAME = "MICROSERVICO-ANALISE-INTELIGENTE";
 
@@ -72,11 +76,54 @@ public class AnaliseBFFService {
             HttpEntity<JsonNode> entity = new HttpEntity<>(requestBody, headers);
 
             ResponseEntity<JsonNode> response = loadBalancedRestTemplate.exchange(url, HttpMethod.POST, entity, JsonNode.class);
-            return response.getBody();
+            JsonNode resultados = response.getBody();
+            return enriquecerComDadosDoDetran(resultados);
+            //return resultados;
 
         } catch (Exception e) {
             log.error("❌ [BFF] Erro ao comunicar com o serviço de Análise: {}", e.getMessage());
             throw new RuntimeException("Falha ao analisar comboio avançado: " + e.getMessage());
         }
+    }
+
+    /**
+     * Método auxiliar que recebe a lista de suspeitos da IA e injeta os dados do Detran
+     */
+    private JsonNode enriquecerComDadosDoDetran(JsonNode resultados) {
+        if (resultados != null && resultados.isArray()) {
+            for (JsonNode node : resultados) {
+                if (node instanceof ObjectNode objNode) {
+                    String placaSuspeita = objNode.has("placa") ? objNode.get("placa").asText() : null;
+
+                    if (placaSuspeita != null) {
+                        JsonNode dadosDetran = detranService.consultarVeiculo(placaSuspeita);
+
+                        if (dadosDetran != null) {
+                            // Navega nos nós internos garantindo que não vai dar NullPointerException
+                            String marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
+                                    ? dadosDetran.get("marca").get("descricao").asText()
+                                    : "N/I";
+
+                            String cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
+                                    ? dadosDetran.get("cor").get("descricao").asText()
+                                    : "N/I";
+
+                            String municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
+                                    ? dadosDetran.get("municipio").get("nome").asText()
+                                    : "N/I";
+
+                            objNode.put("marcaModelo", marcaModelo);
+                            objNode.put("cor", cor);
+                            objNode.put("municipio", municipio);
+                        } else {
+                            objNode.put("marcaModelo", "Não Encontrado");
+                            objNode.put("cor", "Não Encontrado");
+                            objNode.put("municipio", "Não Encontrado");
+                        }
+                    }
+                }
+            }
+        }
+        return resultados;
     }
 }

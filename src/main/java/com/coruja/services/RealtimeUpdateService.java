@@ -39,7 +39,7 @@ public class RealtimeUpdateService {
     // Este método "ouve" a fila que recebe os dados de todos os radares
     @RabbitListener(queues = RabbitMQConfig.RADARES_DATA_QUEUE) // IMPORTANTE: Este deve ser o nome da sua fila principal
     public void receiveRadarMessage(String message) {
-        logger.info("Mensagem recebida do RabbitMQ: {}", message);
+        //logger.info("Mensagem recebida do RabbitMQ: {}", message);
         try {
             if (message == null || message.isBlank()) {
                 logger.warn("Mensagem vazia recebida do RabbitMQ. Ignorando.");
@@ -122,7 +122,7 @@ public class RealtimeUpdateService {
                 lastRadarByConcessionaria.put(radarData.getConcessionaria().toUpperCase(), radarData);
                 // 2. Envia para o frontend via WebSocket.
                 messagingTemplate.convertAndSend("/topic/last-radar", radarData);
-                logger.info("Último radar da {} enviado para o frontend via WebSocket.", radarData.getConcessionaria());
+                //logger.info("Último radar da {} enviado para o frontend via WebSocket.", radarData.getConcessionaria());
             }
 
         } catch (Exception e) {
