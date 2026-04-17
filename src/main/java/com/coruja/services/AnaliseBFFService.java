@@ -13,6 +13,11 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import jakarta.servlet.http.HttpServletRequest;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+
 @Service
 @Slf4j
 public class AnaliseBFFService {
@@ -91,37 +96,43 @@ public class AnaliseBFFService {
      */
     private JsonNode enriquecerComDadosDoDetran(JsonNode resultados) {
         if (resultados != null && resultados.isArray()) {
-            for (JsonNode node : resultados) {
-                if (node instanceof ObjectNode objNode) {
-                    String placaSuspeita = objNode.has("placa") ? objNode.get("placa").asText() : null;
+            // Inicializa o executor de Virtual Threads
+            try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-                    if (placaSuspeita != null) {
-                        JsonNode dadosDetran = detranService.consultarVeiculo(placaSuspeita);
+                for (JsonNode node : resultados) {
+                    if (node instanceof ObjectNode objNode) {
+                        String placaSuspeita = objNode.has("placa") ? objNode.get("placa").asText() : null;
 
-                        if (dadosDetran != null) {
-                            // Navega nos nós internos garantindo que não vai dar NullPointerException
-                            String marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
-                                    ? dadosDetran.get("marca").get("descricao").asText()
-                                    : "N/I";
+                        if (placaSuspeita != null) {
+                            // Dispara a consulta em paralelo
+                            futures.add(CompletableFuture.runAsync(() -> {
+                                JsonNode dadosDetran = detranService.consultarVeiculo(placaSuspeita);
 
-                            String cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
-                                    ? dadosDetran.get("cor").get("descricao").asText()
-                                    : "N/I";
+                                if (dadosDetran != null) {
+                                    String marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
+                                            ? dadosDetran.get("marca").get("descricao").asText() : "N/I";
 
-                            String municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
-                                    ? dadosDetran.get("municipio").get("nome").asText()
-                                    : "N/I";
+                                    String cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
+                                            ? dadosDetran.get("cor").get("descricao").asText() : "N/I";
 
-                            objNode.put("marcaModelo", marcaModelo);
-                            objNode.put("cor", cor);
-                            objNode.put("municipio", municipio);
-                        } else {
-                            objNode.put("marcaModelo", "Não Encontrado");
-                            objNode.put("cor", "Não Encontrado");
-                            objNode.put("municipio", "Não Encontrado");
+                                    String municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
+                                            ? dadosDetran.get("municipio").get("nome").asText() : "N/I";
+
+                                    objNode.put("marcaModelo", marcaModelo);
+                                    objNode.put("cor", cor);
+                                    objNode.put("municipio", municipio);
+                                } else {
+                                    objNode.put("marcaModelo", "Não Encontrado");
+                                    objNode.put("cor", "Não Encontrado");
+                                    objNode.put("municipio", "Não Encontrado");
+                                }
+                            }, executor));
                         }
                     }
                 }
+                // Aguarda que TODAS as consultas paralelas finalizem antes de devolver o resultado
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             }
         }
         return resultados;

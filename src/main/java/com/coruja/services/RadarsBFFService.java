@@ -151,7 +151,7 @@ public class RadarsBFFService {
     // ==================================================================================
     public RadarPageDTO buscarPorLocal(
             List<String> concessionarias, LocalDate data, LocalTime horaInicial, LocalTime horaFinal,
-            String rodovia, String km, String sentido, Pageable pageable) {
+            String rodovia, String praca, String km, String sentido, Pageable pageable) {
 
         List<String> urls;
 
@@ -179,7 +179,7 @@ public class RadarsBFFService {
 
         List<CompletableFuture<RadarPageDTO>> futures = urls.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
-                        () -> fetchLocalFromMicroservice(baseUrl, data, horaInicial, horaFinal, rodovia, km, sentido, pageable),
+                        () -> fetchLocalFromMicroservice(baseUrl, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable),
                         executorService))
                 .toList();
 
@@ -189,33 +189,53 @@ public class RadarsBFFService {
     private RadarPageDTO fetchLocalFromMicroservice(
             String baseUrl, LocalDate data,
             LocalTime horaInicial, LocalTime horaFinal,
-            String rodovia, String km, String sentido, Pageable pageable
+            String rodovia, String praca, String km, String sentido, Pageable pageable
     ) {
         try {
-            UriComponentsBuilder builder = UriComponentsBuilder
-                    .fromUriString("http://" + baseUrl + "/radares/busca-local")
-                    .queryParam("data",        data)
-                    .queryParam("horaInicial", horaInicial)
-                    .queryParam("horaFinal",   horaFinal)
-                    .queryParam("rodovia",     rodovia)
-                    .queryParam("km",          km)
-                    .queryParam("sentido",     sentido)
-                    .queryParam("page",        pageable.getPageNumber())
-                    .queryParam("size",        pageable.getPageSize());
+            // Montamos a URL com placeholders do Spring (ex: {km}, {rodovia})
+            StringBuilder urlBuilder = new StringBuilder("http://" + baseUrl + "/radares/busca-local");
+            urlBuilder.append("?data={data}");
+            urlBuilder.append("&horaInicial={horaInicial}");
+            urlBuilder.append("&horaFinal={horaFinal}");
+            urlBuilder.append("&rodovia={rodovia}");
+            urlBuilder.append("&km={km}");
+            urlBuilder.append("&sentido={sentido}");
+            urlBuilder.append("&page={page}");
+            urlBuilder.append("&size={size}");
 
-            // 1. Gera a string base com o encoding padrão do Spring (que ignora o '+')
-            String urlGerada = builder.build().encode().toUriString();
+            // Preenchemos os valores reais em um Map
+            Map<String, Object> params = new HashMap<>();
+            params.put("data", data.toString());
+            params.put("horaInicial", horaInicial.toString());
+            params.put("horaFinal", horaFinal.toString());
+            params.put("rodovia", rodovia);
+            params.put("km", km); // O Spring garantirá que o "498+600" chegue ileso
+            params.put("sentido", sentido);
+            params.put("page", pageable.getPageNumber());
+            params.put("size", pageable.getPageSize());
 
-            // 2. 🔴 CORREÇÃO: Força o encoding do '+' para '%2B' manualmente
-            // Isso garante que "498+600" chegue como "498%2B600" no destino
-            String urlCorrigida = urlGerada.replace("+", "%2B");
+            // Se a praça não for nula, enviamos EXATAMENTE como veio (mesmo se for "" ou " ")
+            if (praca != null) {
+                urlBuilder.append("&praca={praca}");
+                params.put("praca", praca);
+            }
 
-            URI uri = URI.create(urlCorrigida);
-
-            log.info("📡 [BFF Local] Chamando: {}", uri);
+            String urlStr = urlBuilder.toString();
+            log.info("📡 [BFF Local] Chamando: {} com params: {}", urlStr, params);
 
             String cbName = "radaresLocal-" + baseUrl.toLowerCase().replace("microservico-radares-", "");
-            return executeCircuitBreakerRequestJsonNode(cbName, baseUrl, uri.toString());
+
+            return circuitBreakerFactory.create(cbName).run(() -> {
+                // Ao passar o Map 'params', o RestTemplate cuida de todo o encoding automaticamente!
+                ResponseEntity<JsonNode> response = loadBalancedRestTemplate.getForEntity(urlStr, JsonNode.class, params);
+                RadarPageDTO result = parseJsonNodeToPage(response.getBody(), baseUrl);
+                log.info("✅ [BFF Local] Sucesso: {} registros de {}", result.getContent().size(), baseUrl);
+                return result;
+            }, throwable -> {
+                logThrowable("[BFF Local]", cbName, baseUrl, throwable);
+                return paginaVazia(Pageable.unpaged());
+            });
+
         } catch (Exception e) {
             log.error("🔥 Erro ao preparar chamada local para {}: {}", baseUrl, e.getMessage());
             return paginaVazia(pageable);
@@ -509,9 +529,10 @@ public class RadarsBFFService {
     /**
      * CB para busca-local — mesmo padrão, separado para clareza nos logs.
      */
-    private RadarPageDTO executeCircuitBreakerRequestJsonNode(String cbName, String baseUrl, String url) {
+    private RadarPageDTO executeCircuitBreakerRequestJsonNode(String cbName, String baseUrl, URI uri) {
         return circuitBreakerFactory.create(cbName).run(() -> {
-            ResponseEntity<JsonNode> response = loadBalancedRestTemplate.getForEntity(url, JsonNode.class);
+            // 🔴 ENVIANDO A 'uri' COMO OBJETO: Impede o Spring de fazer % virar %25
+            ResponseEntity<JsonNode> response = loadBalancedRestTemplate.getForEntity(uri, JsonNode.class);
             RadarPageDTO result = parseJsonNodeToPage(response.getBody(), baseUrl);
             log.info("✅ [BFF Local] Sucesso: {} registros de {}", result.getContent().size(), baseUrl);
             return result;

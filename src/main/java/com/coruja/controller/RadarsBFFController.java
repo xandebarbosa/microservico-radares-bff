@@ -90,6 +90,7 @@ public class RadarsBFFController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
             @RequestParam(required = false) String rodovia,
+            @RequestParam(required = false) String praca,
             @RequestParam(required = false) String km,
             @RequestParam(required = false) String sentido,
             @PageableDefault(size = 20) Pageable pageable
@@ -98,7 +99,7 @@ public class RadarsBFFController {
                 concessionaria, data, rodovia);
         try {
             return ResponseEntity.ok(radarsBFFService.buscarPorLocal(
-                    concessionaria, data, horaInicial, horaFinal, rodovia, km, sentido, pageable
+                    concessionaria, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable
             ));
         } catch (Exception e) {
             log.error("🔥 [BFF] Erro ao buscar por local: {}", e.getMessage());

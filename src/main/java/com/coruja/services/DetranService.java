@@ -41,6 +41,8 @@ public class DetranService {
     private String currentToken = null;
     private LocalDateTime tokenExpirationTime = null;
 
+    private volatile LocalDateTime mainframeBloqueadoAte = null;
+
     /**
      * Obtém o token. Reutiliza o token salvo em memória se ainda estiver dentro do tempo de validade.
      */
@@ -94,6 +96,20 @@ public class DetranService {
      * Consulta os dados de um veículo específico na API do Detran.
      */
     public JsonNode consultarVeiculo(String placa) {
+        // Cria um snapshot da variável volátil para a memória desta Thread.
+        // Isso previne a Race Condition (TOCTOU) e garante Thread-Safety no paralelismo.
+        LocalDateTime bloqueioAtual = this.mainframeBloqueadoAte;
+
+        if (bloqueioAtual != null) {
+            if (LocalDateTime.now().isBefore(bloqueioAtual)) {
+                log.warn("⚠️ Consulta ignorada para {}: Mainframe do Detran em período de bloqueio.", placa);
+                return null; // Retorna nulo imediatamente sem travar a thread
+            } else {
+                // O período de bloqueio de 2 minutos já passou, podemos limpar com segurança.
+                this.mainframeBloqueadoAte = null;
+            }
+        }
+
         String token = obterToken();
         if (token == null) {
             log.warn("Falha na autenticação: Não foi possível obter o token do Detran para consultar a placa {}", placa);
@@ -167,6 +183,12 @@ public class DetranService {
         if (e.getMessage() != null && e.getMessage().contains("401")) {
             log.warn("⚠️ Token do Detran invalidado. Forçando renovação.");
             this.currentToken = null;
+        }
+
+        // NOVA LÓGICA: Se for erro de Mainframe (500 ou ConnectionException), bloqueia novas tentativas por 2 minutos
+        if (e.getMessage() != null && (e.getMessage().contains("500") || e.getMessage().contains("ConnectionException"))) {
+            log.warn("🚨 Detran Mainframe indisponível! Suspendendo consultas por 1 minutos para evitar timeouts em cascata.");
+            this.mainframeBloqueadoAte = LocalDateTime.now().minusMinutes(1);
         }
 
         return null;
