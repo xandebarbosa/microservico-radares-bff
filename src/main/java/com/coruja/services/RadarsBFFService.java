@@ -636,6 +636,14 @@ public class RadarsBFFService {
         JsonNode contentNode = root.get("content");
         if (contentNode != null && contentNode.isArray() && !contentNode.isEmpty()) {
             content = MAPPER.convertValue(contentNode, new TypeReference<>() {});
+
+            // 🚀 A BLINDAGEM: Se o JSON veio sem concessionária, o BFF injeta baseado no nome do microsserviço chamado
+            String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
+            for (RadarDTO dto : content) {
+                if (dto.getConcessionaria() == null || dto.getConcessionaria().trim().isEmpty()) {
+                    dto.setConcessionaria(concName);
+                }
+            }
         }
 
         int number = 0, size = 20, totalPages = 0;
@@ -830,6 +838,15 @@ public class RadarsBFFService {
                 JsonNode contentNode = root.get("content");
                 if (contentNode != null && contentNode.isArray() && contentNode.size() > 0) {
                     List<RadarDTO> batch = MAPPER.convertValue(contentNode, new TypeReference<>() {});
+
+                    // 🚀 A BLINDAGEM PARA O EXCEL
+                    String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
+                    for (RadarDTO dto : batch) {
+                        if (dto.getConcessionaria() == null || dto.getConcessionaria().trim().isEmpty()) {
+                            dto.setConcessionaria(concName);
+                        }
+                    }
+
                     all.addAll(batch);
                     log.info("✅ [Exportação] {} registros da página {} de {}", batch.size(), page, baseUrl);
                 }
