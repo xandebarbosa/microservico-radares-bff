@@ -354,4 +354,56 @@ public class RadarsBFFController {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
         }
     }
+
+    @GetMapping("/busca-local-detran")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<RadarPageDTO> buscarPorLocalComDetran(
+            @RequestParam(required = false) List<String> concessionaria,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal,
+            @RequestParam(required = false) String rodovia,
+            @RequestParam(required = false) String praca,
+            @RequestParam(required = false) String km,
+            @RequestParam(required = false) String sentido,
+            @PageableDefault(size = 20) Pageable pageable
+    ) {
+        log.info("🔍 [BFF] Buscando Local c/ Detran | Concessionárias: {} | Data: {}", concessionaria, data);
+
+        try {
+            return ResponseEntity.ok(radarsBFFService.buscarPorLocalComDetran(
+                    concessionaria, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable
+            ));
+        } catch (Exception e) {
+            log.error("🔥 [BFF] Erro ao buscar por local com Detran: {}", e.getMessage());
+            RadarPageDTO emptyPage = new RadarPageDTO();
+            emptyPage.setContent(Collections.emptyList());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+        }
+    }
+
+    @GetMapping("/exportar-detran")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    public ResponseEntity<List<RadarDTO>> exportarComDetran(
+            @RequestParam(required = false) List<String> concessionaria,
+            @RequestParam(required = false) String placa,
+            @RequestParam(required = false) String rodovia,
+            @RequestParam(required = false) String km,
+            @RequestParam(required = false) String sentido,
+            @RequestParam(required = false) String praca,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate data,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaInicial,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.TIME) LocalTime horaFinal
+    ) {
+        log.info("💾 [BFF] Exportação enriquecida solicitada");
+        try {
+            List<RadarDTO> result = radarsBFFService.exportarComDadosDetran(
+                    concessionaria, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
+            );
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("🔥 Erro na exportação Detran: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Collections.emptyList());
+        }
+    }
 }

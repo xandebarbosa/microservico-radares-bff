@@ -67,7 +67,7 @@ public class RestTemplateConfig {
     public ClientHttpRequestFactory clientHttpRequestFactory() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(60000);
-        factory.setReadTimeout(90000);
+        factory.setReadTimeout(300000); // 🚀 AUMENTADO: 5 minutos (300.000 ms) para ler os dados pesados
         return factory;
     }
 

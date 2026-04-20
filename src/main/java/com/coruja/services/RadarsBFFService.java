@@ -57,6 +57,7 @@ public class RadarsBFFService {
     private final RealtimeUpdateService   realtimeUpdateService;
     private final CircuitBreakerFactory   circuitBreakerFactory;
     private final SimpMessagingTemplate   messagingTemplate;
+    private final DetranService           detranService;
 
     // Virtual Threads
     private final ExecutorService         executorService = Executors.newVirtualThreadPerTaskExecutor();
@@ -77,13 +78,15 @@ public class RadarsBFFService {
             @Qualifier("directRestTemplate") RestTemplate directRestTemplate,
             RealtimeUpdateService realtimeUpdateService,
             CircuitBreakerFactory circuitBreakerFactory,
-            SimpMessagingTemplate messagingTemplate
+            SimpMessagingTemplate messagingTemplate,
+            DetranService detranService
     ) {
         this.loadBalancedRestTemplate = loadBalancedRestTemplate;
         this.directRestTemplate       = directRestTemplate;
         this.realtimeUpdateService    = realtimeUpdateService;
         this.circuitBreakerFactory    = circuitBreakerFactory;
         this.messagingTemplate        = messagingTemplate;
+        this.detranService            = detranService;
     }
 
     // ─── Inicialização ──────────────────────────────────────────────────────────
@@ -344,7 +347,7 @@ public class RadarsBFFService {
 
         return futures.stream()
                 .map(f -> {
-                    try { return f.get(5, TimeUnit.SECONDS); }
+                    try { return f.get(5, TimeUnit.MINUTES); }
                     catch (Exception e) {
                         log.error("Erro ao buscar localizações: {}", e.getMessage());
                         return Collections.<RadarLocationDTO>emptyList();
@@ -371,7 +374,7 @@ public class RadarsBFFService {
 
         List<RadarDTO> all = futures.stream()
                 .map(f -> {
-                    try { return f.get(60, TimeUnit.SECONDS); }
+                    try { return f.get(5, TimeUnit.MINUTES); }
                     catch (Exception e) {
                         log.error("Erro geo exportação: {}", e.toString());
                         return Collections.<RadarDTO>emptyList();
@@ -413,7 +416,7 @@ public class RadarsBFFService {
 
         List<RadarDTO> all = futures.stream()
                 .map(f -> {
-                    try { return f.get(60, TimeUnit.SECONDS); }
+                    try { return f.get(5, TimeUnit.MINUTES); }
                     catch (Exception e) { return Collections.<RadarDTO>emptyList(); }
                 })
                 .flatMap(List::stream)
@@ -422,6 +425,45 @@ public class RadarsBFFService {
 
         log.info("Exportação finalizada. Total: {}", all.size());
         return all;
+    }
+
+    public List<RadarDTO> exportarComDadosDetran(
+            List<String> concessionarias, String placa, String praca,
+            String rodovia, String km, String sentido,
+            LocalDate data, LocalTime horaInicial, LocalTime horaFinal
+    ) {
+        // 1. Busca todos os dados brutos dos radares (sem paginação)
+        List<RadarDTO> listaRadares = buscarTodosParaExportacao(
+                concessionarias, placa, praca, rodovia, km, sentido, data, horaInicial, horaFinal
+        );
+
+        if (listaRadares.isEmpty()) return listaRadares;
+
+        log.info("📊 [BFF] Iniciando enriquecimento de {} registros para exportação...", listaRadares.size());
+
+        // 2. Enriquece em paralelo usando Virtual Threads
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+            for (RadarDTO radar : listaRadares) {
+                if (radar.getPlaca() != null && !radar.getPlaca().isEmpty()) {
+                    futures.add(CompletableFuture.runAsync(() -> {
+                        JsonNode dados = detranService.consultarVeiculo(radar.getPlaca());
+                        if (dados != null) {
+                            radar.setMarcaModelo(dados.hasNonNull("marca") && dados.get("marca").hasNonNull("descricao")
+                                    ? dados.get("marca").get("descricao").asText() : "N/I");
+                            radar.setCor(dados.hasNonNull("cor") && dados.get("cor").hasNonNull("descricao")
+                                    ? dados.get("cor").get("descricao").asText() : "N/I");
+                            radar.setMunicipio(dados.hasNonNull("municipio") && dados.get("municipio").hasNonNull("nome")
+                                    ? dados.get("municipio").get("nome").asText() : "N/I");
+                        }
+                    }, executor));
+                }
+            }
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        }
+
+        return listaRadares;
     }
 
     // ==================================================================================
@@ -638,7 +680,7 @@ public class RadarsBFFService {
 
         return futures.stream()
                 .map(f -> {
-                    try { return f.get(5, TimeUnit.SECONDS); }
+                    try { return f.get(5, TimeUnit.MINUTES); }
                     catch (Exception e) { return Collections.<T>emptyList(); }
                 })
                 .flatMap(List::stream)
@@ -1003,5 +1045,51 @@ public class RadarsBFFService {
 
         return new RadarPageDTO(paginaAtual,
                 new PageMetadata(pageNumber, pageSize, totalElements, totalPages));
+    }
+
+    public RadarPageDTO buscarPorLocalComDetran(
+            List<String> concessionarias, LocalDate data, LocalTime horaInicial, LocalTime horaFinal,
+            String rodovia, String praca, String km, String sentido, Pageable pageable) {
+
+        // 1. Faz a busca normal nos microserviços de radares
+        RadarPageDTO pagina = buscarPorLocal(concessionarias, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable);
+
+        // 2. Enriquece a página de resultados com dados do Detran paralelamente
+        if (pagina.getContent() != null && !pagina.getContent().isEmpty()) {
+            try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+                for (RadarDTO radar : pagina.getContent()) {
+                    if (radar.getPlaca() != null && !radar.getPlaca().isEmpty()) {
+                        futures.add(CompletableFuture.runAsync(() -> {
+                            JsonNode dadosDetran = detranService.consultarVeiculo(radar.getPlaca());
+
+                            if (dadosDetran != null) {
+                                String marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
+                                        ? dadosDetran.get("marca").get("descricao").asText() : "N/I";
+
+                                String cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
+                                        ? dadosDetran.get("cor").get("descricao").asText() : "N/I";
+
+                                String municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
+                                        ? dadosDetran.get("municipio").get("nome").asText() : "N/I";
+
+                                radar.setMarcaModelo(marcaModelo);
+                                radar.setCor(cor);
+                                radar.setMunicipio(municipio);
+                            } else {
+                                radar.setMarcaModelo("Não Encontrado");
+                                radar.setCor("Não Encontrado");
+                                radar.setMunicipio("Não Encontrado");
+                            }
+                        }, executor));
+                    }
+                }
+                // Aguarda todas as chamadas do Detran terminarem antes de devolver a página
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            }
+        }
+
+        return pagina;
     }
 }

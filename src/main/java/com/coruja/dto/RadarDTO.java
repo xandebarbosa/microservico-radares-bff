@@ -25,4 +25,9 @@ public class RadarDTO {
     private String sentido;
     private String concessionaria;
 
+    //Campos API do Detran
+    private String marcaModelo;
+    private String cor;
+    private String municipio;
+
 }
