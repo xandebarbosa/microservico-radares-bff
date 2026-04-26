@@ -64,6 +64,8 @@ public class RadarsBFFService {
 
     // ─── Estado ─────────────────────────────────────────────────────────────────
     private RestTemplate monitoramentoRestTemplate;
+    // Cache de memória para Fallback do Mapa (Resiliência)
+    private final ConcurrentHashMap<String, List<RadarLocationDTO>> locationsFallbackCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> serviceUrlMap = new ConcurrentHashMap<>();
 
     private volatile String ultimoIdRondonEnviado    = "";
@@ -128,7 +130,38 @@ public class RadarsBFFService {
                         () -> fetchPlacaFromMicroservice(baseUrl, placa, pageable), executorService))
                 .toList();
 
-        return aggregateGlobalPages(collectFutures(futures), pageable);
+        RadarPageDTO pagina = aggregateGlobalPages(collectFutures(futures), pageable);
+
+        // 🚀 NOVO: ENRIQUECIMENTO COM DADOS DO DETRAN
+        if (pagina.getContent() != null && !pagina.getContent().isEmpty()) {
+
+            // Como a busca é de uma placa específica, fazemos apenas UMA chamada na API do Detran
+            JsonNode dadosDetran = detranService.consultarVeiculo(placa);
+
+            String marcaModelo = "Não Encontrado";
+            String cor = "Não Encontrado";
+            String municipio = "Não Encontrado";
+
+            if (dadosDetran != null) {
+                marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
+                        ? dadosDetran.get("marca").get("descricao").asText() : "N/I";
+
+                cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
+                        ? dadosDetran.get("cor").get("descricao").asText() : "N/I";
+
+                municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
+                        ? dadosDetran.get("municipio").get("nome").asText() : "N/I";
+            }
+
+            // Aplica os mesmos dados para todos os registros retornados na página
+            for (RadarDTO radar : pagina.getContent()) {
+                radar.setMarcaModelo(marcaModelo);
+                radar.setCor(cor);
+                radar.setMunicipio(municipio);
+            }
+        }
+
+        return pagina;
     }
 
     private RadarPageDTO fetchPlacaFromMicroservice(String baseUrl, String placa, Pageable pageable) {
@@ -333,12 +366,13 @@ public class RadarsBFFService {
         return aggregateGlobalPages(collectFutures(futures), pageable);
     }
 
-    @Cacheable(value = "locais-radares-bff", unless = "#result == null || #result.isEmpty()")
+    //@Cacheable(value = "locais-radares-bff", unless = "#result == null || #result.isEmpty()")
     public List<RadarLocationDTO> getAllRadarLocations() {
+        log.info("🚨 [BFF-MAPA] O FrontEnd pediu o mapa! Se este log apareceu, o CACHE ESTÁ DESLIGADO!");
         List<String> urls = new ArrayList<>(serviceUrlMap.values());
         if (urls.isEmpty()) return Collections.emptyList();
 
-        log.info("Buscando localizações de radares em {} serviços...", urls.size());
+        log.info("🚨 [BFF-MAPA] O BFF vai disparar requisições para {} concessionárias: {}", urls.size(), urls);
 
         List<CompletableFuture<List<RadarLocationDTO>>> futures = urls.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
@@ -384,8 +418,11 @@ public class RadarsBFFService {
                 .sorted(comparatorDataHoraDesc())
                 .collect(Collectors.toList());
 
+        // 🚀 APLICA A DEDUPLICAÇÃO NA EXPORTAÇÃO GEOESPACIAL
+        List<RadarDTO> dadosDeduplicados = removerDuplicados(all);
+
         log.info("Exportação GEO finalizada. Total: {}", all.size());
-        return all;
+        return dadosDeduplicados;
     }
 
     // ==================================================================================
@@ -397,15 +434,30 @@ public class RadarsBFFService {
             String rodovia, String km, String sentido,
             LocalDate data, LocalTime horaInicial, LocalTime horaFinal
     ) {
-        List<String> urls = CollectionUtils.isEmpty(concessionarias)
-                ? new ArrayList<>(serviceUrlMap.values())
-                : concessionarias.stream()
-                .map(nome -> serviceUrlMap.get(nome.toLowerCase()))
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+        List<String> urls;
 
-        if (urls.isEmpty()) return Collections.emptyList();
+        // 1. Blindagem e Sanitização (Semelhante ao buscarPorLocal)
+        if (CollectionUtils.isEmpty(concessionarias)) {
+            urls = new ArrayList<>(serviceUrlMap.values());
+            log.warn("⚠️ [BFF Exportação] Nenhuma concessionária informada. Modo Broadcast ativado.");
+        } else {
+            urls = concessionarias.stream()
+                    .filter(c -> c != null && !c.isBlank())
+                    .flatMap(c -> Arrays.stream(c.split(","))) // Divide caso venha agrupado "entrevias,rondon"
+                    .map(String::trim)
+                    .map(String::toLowerCase)
+                    .map(serviceUrlMap::get)
+                    .filter(Objects::nonNull)
+                    .distinct() // Evita duplicidade de chamadas
+                    .collect(Collectors.toList());
+        }
 
+        if (urls.isEmpty()) {
+            log.warn("⚠️ [BFF Exportação] Nenhuma concessionária válida identificada. Cancelando.");
+            return Collections.emptyList();
+        }
+
+        // 2. Dispara a busca apenas nos serviços identificados
         List<CompletableFuture<List<RadarDTO>>> futures = urls.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
                         () -> fetchAllPagesFromMicroservice(
@@ -423,8 +475,11 @@ public class RadarsBFFService {
                 .sorted(comparatorDataHoraDesc())
                 .collect(Collectors.toList());
 
+        // 🚀 APLICA A DEDUPLICAÇÃO NA EXPORTAÇÃO
+        List<RadarDTO> dadosDeduplicados = removerDuplicados(all);
+
         log.info("Exportação finalizada. Total: {}", all.size());
-        return all;
+        return dadosDeduplicados;
     }
 
     public List<RadarDTO> exportarComDadosDetran(
@@ -550,6 +605,32 @@ public class RadarsBFFService {
                         .thenComparing(RadarDTO::getHora,
                                 Comparator.nullsLast(Comparator.reverseOrder())))
                 .limit(10)
+                .collect(Collectors.toList());
+    }
+
+    // ─── Método Utilitário de Deduplicação ──────────────────────────────────────
+
+    /**
+     * Remove registros de radares duplicados baseados na mesma Placa, Data e Hora exata.
+     */
+    private List<RadarDTO> removerDuplicados(List<RadarDTO> radares) {
+        Set<String> vistos = new HashSet<>();
+        return radares.stream()
+                .filter(r -> {
+                    // Se faltar algum dado essencial, mantemos por segurança
+                    if (r.getPlaca() == null || r.getData() == null || r.getHora() == null) {
+                        return true;
+                    }
+
+                    // Chave de unicidade (Ex: "ABC1D23|2026-04-26|08:48:28")
+                    String chaveUnica = r.getPlaca().trim().toUpperCase() + "|" +
+                            r.getData().toString() + "|" +
+                            r.getHora().toString();
+
+                    // O método add() retorna 'true' se for um item inédito,
+                    // e 'false' se já existir no Set (ou seja, é duplicado e será removido)
+                    return vistos.add(chaveUnica);
+                })
                 .collect(Collectors.toList());
     }
 
@@ -782,6 +863,9 @@ public class RadarsBFFService {
                 .limit(pageable.getPageSize()) // Corta o excesso de forma segura
                 .collect(Collectors.toList());
 
+        // 🚀 APLICA A DEDUPLICAÇÃO ANTES DE MOSTRAR NA TELA
+        List<RadarDTO> deduplicados = removerDuplicados(combined);
+
         long totalElements = pages.stream()
                 .filter(p -> p != null && p.getPage() != null)
                 .mapToLong(p -> p.getPage().getTotalElements())
@@ -790,10 +874,15 @@ public class RadarsBFFService {
         int pageSize = pageable.getPageSize();
         int totalPages = pageSize > 0 ? (int) Math.ceil((double) totalElements / pageSize) : 0;
 
-        log.info("📄 [BFF] Paginação global: {} registros totais, página {}/{}, retornando {}",
-                totalElements, pageable.getPageNumber(), totalPages, combined.size());
+        // Limita ao tamanho da página
+        List<RadarDTO> paged = deduplicados.stream()
+                .limit(pageSize)
+                .collect(Collectors.toList());
 
-        return new RadarPageDTO(combined, new PageMetadata(pageable.getPageNumber(), pageSize, totalElements, totalPages));
+        log.info("📄 [BFF] Paginação global: {} registros totais reportados, página {}/{}, retornando {} deduplicados",
+                totalElements, pageable.getPageNumber(), totalPages, paged.size());
+
+        return new RadarPageDTO(paged, new PageMetadata(pageable.getPageNumber(), pageSize, totalElements, totalPages));
     }
 
     // ─── Exportação paginada ─────────────────────────────────────────────────────
@@ -936,14 +1025,41 @@ public class RadarsBFFService {
 
         return circuitBreakerFactory.create("locationsService").run(
                 () -> {
-                    ResponseEntity<List<RadarLocationDTO>> response = loadBalancedRestTemplate.exchange(
-                            url, HttpMethod.GET, null,
-                            new ParameterizedTypeReference<>() {});
-                    return response.getBody() != null ? response.getBody() : Collections.emptyList();
+                    // 1. Busca como JsonNode genérico para o RestTemplate padrão não quebrar com campos extras
+                    ResponseEntity<JsonNode> response = loadBalancedRestTemplate.exchange(
+                            url, HttpMethod.GET, null, JsonNode.class);
+
+                    JsonNode body = response.getBody();
+                    List<RadarLocationDTO> results = new ArrayList<>();
+
+                    // 2. Converte usando o MAPPER customizado do BFF (que ignora propriedades desconhecidas)
+                    if (body != null && body.isArray()) {
+                        results = MAPPER.convertValue(body, new TypeReference<List<RadarLocationDTO>>() {});
+                    }
+
+                    // 3. Blindagem de segurança: Garante a concessionária correta
+                    String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
+                    for (RadarLocationDTO r : results) {
+                        if (r.getConcessionaria() == null || r.getConcessionaria().isBlank()) {
+                            r.setConcessionaria(concName);
+                        }
+                    }
+
+                    // 4. Salva no cache de resiliência se a chamada foi um sucesso
+                    if (!results.isEmpty()) {
+                        locationsFallbackCache.put(baseUrl, results);
+                    }
+
+                    return results;
                 },
                 throwable -> {
-                    log.warn("Fallback locations {}: {}", baseUrl, throwable.getMessage());
-                    return Collections.emptyList();
+                    // 5. Fallback seguro
+                    List<RadarLocationDTO> cachedData = locationsFallbackCache.getOrDefault(baseUrl, Collections.emptyList());
+
+                    log.warn("⚠️ [Circuit Breaker FALLBACK] Falha ao processar {}: {}. Retornando {} registros salvos em cache.",
+                            baseUrl, throwable.getMessage(), cachedData.size());
+
+                    return cachedData;
                 }
         );
     }
