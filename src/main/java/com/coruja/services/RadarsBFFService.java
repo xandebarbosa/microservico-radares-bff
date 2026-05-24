@@ -48,7 +48,7 @@ public class RadarsBFFService {
             .configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, false);
 
     // ─── Constantes ─────────────────────────────────────────────────────────────
-    private static final long   REQUEST_TIMEOUT_SECONDS = 120;
+    private static final long   REQUEST_TIMEOUT_SECONDS = 5;  //REQUEST_TIMEOUT_SECONDS
     private static final int    PAGE_SIZE_EXPORTACAO     = 1000;
 
     // ─── Dependências ───────────────────────────────────────────────────────────
@@ -70,10 +70,12 @@ public class RadarsBFFService {
 
     private volatile String ultimoIdRondonEnviado    = "";
     private volatile String ultimoIdMonitoraSPEnviado = "";
+    private volatile String ultimoIdEntreviasEnviado = "";
 
     @Value("${microservico.monitoramento.url:http://MICROSERVICO-MONITORAMENTO}")
     private String monitoramentoUrl;
 
+    private final Semaphore detranRateLimiter = new Semaphore(15);
     // ─── Construtor ─────────────────────────────────────────────────────────────
     public RadarsBFFService(
             RestTemplate loadBalancedRestTemplate,
@@ -132,32 +134,65 @@ public class RadarsBFFService {
 
         RadarPageDTO pagina = aggregateGlobalPages(collectFutures(futures), pageable);
 
-        // 🚀 NOVO: ENRIQUECIMENTO COM DADOS DO DETRAN
+        // 🔥 NOVO: ENRIQUECIMENTO COM DADOS DO DETRAN USANDO O SEMÁFORO GLOBAL
         if (pagina.getContent() != null && !pagina.getContent().isEmpty()) {
+            JsonNode dadosDetran = null;
 
-            // Como a busca é de uma placa específica, fazemos apenas UMA chamada na API do Detran
-            JsonNode dadosDetran = detranService.consultarVeiculo(placa);
-
-            String marcaModelo = "Não Encontrado";
-            String cor = "Não Encontrado";
-            String municipio = "Não Encontrado";
-
-            if (dadosDetran != null) {
-                marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
-                        ? dadosDetran.get("marca").get("descricao").asText() : "N/I";
-
-                cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
-                        ? dadosDetran.get("cor").get("descricao").asText() : "N/I";
-
-                municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
-                        ? dadosDetran.get("municipio").get("nome").asText() : "N/I";
+            try {
+                // 🚦 Proteção de concorrência: Respeita o limite global da API do governo
+                detranRateLimiter.acquire();
+                dadosDetran = detranService.consultarVeiculo(placa);
+            } catch (InterruptedException e) {
+                log.error("Thread interrompida ao aguardar semáforo do Detran para a placa {}", placa);
+                Thread.currentThread().interrupt();
+            } finally {
+                // 🚦 Libera a catraca independentemente de sucesso ou falha
+                detranRateLimiter.release();
             }
 
-            // Aplica os mesmos dados para todos os registros retornados na página
+            // Valores padrão consistentes com o resto do sistema
+            String marcaModelo = "N/I";
+            String cor = "N/I";
+            String municipio = "N/I";
+            String uf = "N/I";
+            String anoModelo = "N/I";
+            String nomeProprietario = "N/I";
+            String cpfProprietario = "N/I";
+
+            if (dadosDetran != null) {
+                marcaModelo = extrairCampoHibrido(dadosDetran, "marca", "descricao");
+                cor = extrairCampoHibrido(dadosDetran, "cor", "descricao");
+                municipio = extrairCampoHibrido(dadosDetran, "municipio", "nome");
+                uf = dadosDetran.hasNonNull("uf") ? dadosDetran.get("uf").asText() : "N/I";
+                anoModelo = dadosDetran.hasNonNull("anoModelo") ? dadosDetran.get("anoModelo").asText() : "N/I";
+
+                // 🔄 LÓGICA HÍBRIDA PARA O PROPRIETÁRIO (v1 e v3)
+                if (dadosDetran.hasNonNull("proprietario")) {
+                    JsonNode propNode = dadosDetran.get("proprietario");
+
+                    // Se for formato v1 (Objeto aninhado)
+                    if (propNode.isObject()) {
+                        nomeProprietario = propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I";
+                        cpfProprietario = propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I";
+                    }
+                    // Se for formato v3 (String e chaves separadas)
+                    else if (propNode.isTextual()) {
+                        nomeProprietario = propNode.asText();
+                        cpfProprietario = dadosDetran.hasNonNull("proprietarioNumeroDocumento")
+                                ? dadosDetran.get("proprietarioNumeroDocumento").asText() : "N/I";
+                    }
+                }
+            }
+
+            // Aplica os mesmos dados extraídos para todo o histórico de passagens dessa placa na página
             for (RadarDTO radar : pagina.getContent()) {
                 radar.setMarcaModelo(marcaModelo);
                 radar.setCor(cor);
                 radar.setMunicipio(municipio);
+                radar.setUf(uf);
+                radar.setAnoModelo(anoModelo);
+                radar.setNomeProprietario(nomeProprietario);
+                radar.setCpfProprietario(cpfProprietario);
             }
         }
 
@@ -228,42 +263,29 @@ public class RadarsBFFService {
             String rodovia, String praca, String km, String sentido, Pageable pageable
     ) {
         try {
-            // Montamos a URL com placeholders do Spring (ex: {km}, {rodovia})
-            StringBuilder urlBuilder = new StringBuilder("http://" + baseUrl + "/radares/busca-local");
-            urlBuilder.append("?data={data}");
-            urlBuilder.append("&horaInicial={horaInicial}");
-            urlBuilder.append("&horaFinal={horaFinal}");
-            urlBuilder.append("&rodovia={rodovia}");
-            urlBuilder.append("&km={km}");
-            urlBuilder.append("&sentido={sentido}");
-            urlBuilder.append("&page={page}");
-            urlBuilder.append("&size={size}");
+            String urlBase = "http://" + baseUrl + "/radares/busca-local";
 
-            // Preenchemos os valores reais em um Map
-            Map<String, Object> params = new HashMap<>();
-            params.put("data", data.toString());
-            params.put("horaInicial", horaInicial.toString());
-            params.put("horaFinal", horaFinal.toString());
-            params.put("rodovia", rodovia);
-            params.put("km", km); // O Spring garantirá que o "498+600" chegue ileso
-            params.put("sentido", sentido);
-            params.put("page", pageable.getPageNumber());
-            params.put("size", pageable.getPageSize());
+            // UriComponentsBuilder remove automaticamente parâmetros nulos
+            UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(urlBase)
+                    .queryParamIfPresent("data", Optional.ofNullable(data != null ? data.toString() : null))
+                    .queryParamIfPresent("horaInicial", Optional.ofNullable(horaInicial != null ? horaInicial.toString() : null))
+                    .queryParamIfPresent("horaFinal", Optional.ofNullable(horaFinal != null ? horaFinal.toString() : null))
+                    .queryParamIfPresent("rodovia", Optional.ofNullable(rodovia))
+                    .queryParamIfPresent("km", Optional.ofNullable(km))
+                    .queryParamIfPresent("sentido", Optional.ofNullable(sentido))
+                    .queryParamIfPresent("praca", Optional.ofNullable(praca))
+                    .queryParam("page", pageable.getPageNumber())
+                    .queryParam("size", pageable.getPageSize());
 
-            // Se a praça não for nula, enviamos EXATAMENTE como veio (mesmo se for "" ou " ")
-            if (praca != null) {
-                urlBuilder.append("&praca={praca}");
-                params.put("praca", praca);
-            }
-
-            String urlStr = urlBuilder.toString();
-            log.info("📡 [BFF Local] Chamando: {} com params: {}", urlStr, params);
+            String urlFinal = builder.toUriString();
+            log.info("📡 [BFF Local] Chamando: {}", urlFinal);
 
             String cbName = "radaresLocal-" + baseUrl.toLowerCase().replace("microservico-radares-", "");
 
             return circuitBreakerFactory.create(cbName).run(() -> {
-                // Ao passar o Map 'params', o RestTemplate cuida de todo o encoding automaticamente!
-                ResponseEntity<JsonNode> response = loadBalancedRestTemplate.getForEntity(urlStr, JsonNode.class, params);
+                // Chamada direta com a URL final já codificada e limpa
+                ResponseEntity<JsonNode> response = loadBalancedRestTemplate.getForEntity(urlFinal, JsonNode.class);
+
                 RadarPageDTO result = parseJsonNodeToPage(response.getBody(), baseUrl);
                 log.info("✅ [BFF Local] Sucesso: {} registros de {}", result.getContent().size(), baseUrl);
                 return result;
@@ -273,7 +295,7 @@ public class RadarsBFFService {
             });
 
         } catch (Exception e) {
-            log.error("🔥 Erro ao preparar chamada local para {}: {}", baseUrl, e.getMessage());
+            log.error("❌ Erro ao preparar chamada local para {}: {}", baseUrl, e.getMessage());
             return paginaVazia(pageable);
         }
     }
@@ -288,7 +310,7 @@ public class RadarsBFFService {
             unless = "#result == null || #result.isEmpty()"
     )
     public List<RodoviaDTO> listarRodovias(String concessionaria) {
-        log.info("🔍 BFF: Solicitando lista de rodovias aos microserviços...");
+        //log.info("🔍 BFF: Solicitando lista de rodovias aos microserviços...");
 
         if (concessionaria != null && !concessionaria.isEmpty()) {
             String baseUrl = serviceUrlMap.get(concessionaria.toLowerCase());
@@ -318,15 +340,15 @@ public class RadarsBFFService {
     }
 
     public List<KmRodoviaDTO> listarKmsPorRodovia(Long rodoviaId, String concessionaria) {
-        log.info("🔍 BFF: Solicitando lista de KMs por rodovia...");
+        //log.info("🔍 BFF: Solicitando lista de KMs por rodovia...");
         String baseUrl = resolveBaseUrl(concessionaria, "cart");
 
         if (baseUrl == null) {
-            log.warn("⚠️ [BFF] Serviço não encontrado para a concessionária: {}", concessionaria);
+            //log.warn("⚠️ [BFF] Serviço não encontrado para a concessionária: {}", concessionaria);
             return Collections.emptyList();
         }
 
-        log.info("📍 [BFF] Roteando busca de KMs da rodovia {} para: {}", rodoviaId, baseUrl);
+        //log.info("📍 [BFF] Roteando busca de KMs da rodovia {} para: {}", rodoviaId, baseUrl);
         return executeCircuitBreakerListRequest(
                 "listarKms", baseUrl,
                 "http://" + baseUrl + "/radares/rodovias/" + rodoviaId + "/kms",
@@ -368,25 +390,34 @@ public class RadarsBFFService {
 
     //@Cacheable(value = "locais-radares-bff", unless = "#result == null || #result.isEmpty()")
     public List<RadarLocationDTO> getAllRadarLocations() {
-        log.info("🚨 [BFF-MAPA] O FrontEnd pediu o mapa! Se este log apareceu, o CACHE ESTÁ DESLIGADO!");
+        log.info("📍 [BFF-MAPA] O FrontEnd pediu o mapa! Se este log apareceu, o CACHE ESTÁ DESLIGADO!");
         List<String> urls = new ArrayList<>(serviceUrlMap.values());
-        if (urls.isEmpty()) return Collections.emptyList();
 
-        log.info("🚨 [BFF-MAPA] O BFF vai disparar requisições para {} concessionárias: {}", urls.size(), urls);
+        if (urls.isEmpty()) {
+            return Collections.emptyList();
+        }
 
+        log.info("🚀 [BFF-MAPA] O BFF vai disparar requisições simultâneas para {} concessionárias: {}", urls.size(), urls);
+
+        // 1. Dispara todas as requisições assíncronas e configura o timeout/erro em cada uma individualmente
         List<CompletableFuture<List<RadarLocationDTO>>> futures = urls.stream()
-                .map(baseUrl -> CompletableFuture.supplyAsync(
-                        () -> fetchLocationsFromMicroservices(baseUrl), executorService))
-                .toList();
+                .map(baseUrl -> CompletableFuture.supplyAsync(() -> fetchLocationsFromMicroservices(baseUrl), executorService)
+                        // Timeout de 10 segundos (ajuste conforme necessidade)
+                        .completeOnTimeout(Collections.emptyList(), 10, TimeUnit.SECONDS)
+                        // Tratamento de erro individual para saber qual API falhou
+                        .exceptionally(ex -> {
+                            log.error("❌ Erro ou Timeout ao buscar localizações na concessionária [{}]: {}", baseUrl, ex.getMessage());
+                            return Collections.emptyList(); // Se uma falhar, não quebra as outras
+                        })
+                )
+                .toList(); // toList() inicia a execução imediata de todas
 
+        // 2. Aguarda todas as tarefas terminarem em paralelo
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        // 3. Coleta os resultados (aqui o .join() é instantâneo pois o allOf já garantiu o término)
         return futures.stream()
-                .map(f -> {
-                    try { return f.get(5, TimeUnit.MINUTES); }
-                    catch (Exception e) {
-                        log.error("Erro ao buscar localizações: {}", e.getMessage());
-                        return Collections.<RadarLocationDTO>emptyList();
-                    }
-                })
+                .map(CompletableFuture::join)
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
     }
@@ -494,28 +525,75 @@ public class RadarsBFFService {
 
         if (listaRadares.isEmpty()) return listaRadares;
 
-        log.info("📊 [BFF] Iniciando enriquecimento de {} registros para exportação...", listaRadares.size());
+        log.info("🛡️ [BFF] Iniciando enriquecimento SEGURO de {} registros no Detran...", listaRadares.size());
 
-        // 2. Enriquece em paralelo usando Virtual Threads
+        // 2. Extrai apenas as placas únicas (se o carro passou 10x, só consultamos 1x)
+        Set<String> placasUnicas = listaRadares.stream()
+                .map(RadarDTO::getPlaca)
+                .filter(p -> p != null && !p.isBlank())
+                .collect(Collectors.toSet());
+
+        // 3. Mapa para guardar os dados e depois costurar nos radares
+        ConcurrentHashMap<String, JsonNode> dadosDetranMap = new ConcurrentHashMap<>();
+
+        // 4. Dispara a consulta para as placas ÚNICAS, passando pelo Semáforo e pelo Cache
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-            for (RadarDTO radar : listaRadares) {
-                if (radar.getPlaca() != null && !radar.getPlaca().isEmpty()) {
-                    futures.add(CompletableFuture.runAsync(() -> {
-                        JsonNode dados = detranService.consultarVeiculo(radar.getPlaca());
+            for (String placaUnica : placasUnicas) {
+                futures.add(CompletableFuture.runAsync(() -> {
+                    try {
+                        // 🚦 A Thread pede permissão para passar. Se já tiverem 15 na frente, ela aguarda.
+                        detranRateLimiter.acquire();
+
+                        JsonNode dados = detranService.consultarVeiculo(placaUnica);
                         if (dados != null) {
-                            radar.setMarcaModelo(dados.hasNonNull("marca") && dados.get("marca").hasNonNull("descricao")
-                                    ? dados.get("marca").get("descricao").asText() : "N/I");
-                            radar.setCor(dados.hasNonNull("cor") && dados.get("cor").hasNonNull("descricao")
-                                    ? dados.get("cor").get("descricao").asText() : "N/I");
-                            radar.setMunicipio(dados.hasNonNull("municipio") && dados.get("municipio").hasNonNull("nome")
-                                    ? dados.get("municipio").get("nome").asText() : "N/I");
+                            dadosDetranMap.put(placaUnica, dados);
                         }
-                    }, executor));
-                }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        // 🚦 A Thread terminou e libera a catraca para a próxima
+                        detranRateLimiter.release();
+                    }
+                }, executor));
             }
+            // Aguarda todas as buscas finalizarem
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        }
+
+        // 5. Costura os dados retornados na lista original (Super rápido, tudo em memória)
+        for (RadarDTO radar : listaRadares) {
+            JsonNode dados = dadosDetranMap.get(radar.getPlaca());
+            if (dados != null) {
+                radar.setMarcaModelo(extrairCampoHibrido(dados, "marca", "descricao"));
+                radar.setCor(extrairCampoHibrido(dados, "cor", "descricao"));
+                radar.setMunicipio(extrairCampoHibrido(dados, "municipio", "nome"));
+                radar.setUf(dados.hasNonNull("uf") ? dados.get("uf").asText() : "N/I");
+                radar.setAnoModelo(dados.hasNonNull("anoModelo") ? dados.get("anoModelo").asText() : "N/I");
+
+                if (dados.hasNonNull("proprietario")) {
+                    JsonNode propNode = dados.get("proprietario");
+                    if (propNode.isObject()) {
+                        radar.setNomeProprietario(propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I");
+                        radar.setCpfProprietario(propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I");
+                    } else if (propNode.isTextual()) {
+                        radar.setNomeProprietario(propNode.asText());
+                        radar.setCpfProprietario(dados.hasNonNull("proprietarioNumeroDocumento") ? dados.get("proprietarioNumeroDocumento").asText() : "N/I");
+                    }
+                } else {
+                    radar.setNomeProprietario("N/I");
+                    radar.setCpfProprietario("N/I");
+                }
+            } else {
+                radar.setMarcaModelo("N/I");
+                radar.setCor("N/I");
+                radar.setMunicipio("N/I");
+                radar.setUf("N/I");
+                radar.setAnoModelo("N/I");
+                radar.setNomeProprietario("Não Encontrado");
+                radar.setCpfProprietario("Não Encontrado");
+            }
         }
 
         return listaRadares;
@@ -565,45 +643,28 @@ public class RadarsBFFService {
             log.debug("Falha ao buscar histórico no Monitoramento: {}", e.getMessage());
         }
 
-        // 2. Rondon (Quarkus)
-        String baseUrlRondon = serviceUrlMap.get("rondon");
-        if (baseUrlRondon != null) {
-            try {
-                ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
-                        "http://" + baseUrlRondon + "/radares/ultimos?limite=10",
-                        RadarDTO[].class);
-                if (resp.getBody() != null) {
-                    todos.addAll(Arrays.asList(resp.getBody()));
-                    log.info("Recuperados {} registros da Rondon.", resp.getBody().length);
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ Falha ao buscar últimos da Rondon: {}", e.getMessage());
-            }
-        }
+        // 2. Busca Individualizada (Padrão Quarkus/Novos Serviços)
+        List<String> novosServicos = List.of("rondon", "monitorasp", "entrevias");
 
-        // 3. MonitoraSP (Quarkus)
-        String baseUrlMonitoraSP = serviceUrlMap.get("monitorasp");
-        if (baseUrlMonitoraSP != null) {
-            try {
-                ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
-                        "http://" + baseUrlMonitoraSP + "/radares/ultimos?limite=10",
-                        RadarDTO[].class);
-                if (resp.getBody() != null) {
-                    todos.addAll(Arrays.asList(resp.getBody()));
-                    log.info("Recuperados {} registros do MonitoraSP.", resp.getBody().length);
+        for (String servico : novosServicos) {
+            String baseUrl = serviceUrlMap.get(servico);
+            if (baseUrl != null) {
+                try {
+                    ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+                            "http://" + baseUrl + "/radares/ultimos?limite=10", RadarDTO[].class);
+                    if (resp.getBody() != null) {
+                        todos.addAll(Arrays.asList(resp.getBody()));
+                        log.info("✅ Recuperados {} registros da {}.", resp.getBody().length, servico.toUpperCase());
+                    }
+                } catch (Exception e) {
+                    log.warn("❌ Falha ao buscar últimos da {}: {}", servico.toUpperCase(), e.getMessage());
                 }
-            } catch (Exception e) {
-                log.warn("⚠️ Falha ao buscar últimos do MonitoraSP: {}", e.getMessage());
             }
         }
 
         return todos.stream()
                 .filter(Objects::nonNull)
-                .sorted(Comparator
-                        .comparing(RadarDTO::getData,
-                                Comparator.nullsLast(Comparator.reverseOrder()))
-                        .thenComparing(RadarDTO::getHora,
-                                Comparator.nullsLast(Comparator.reverseOrder())))
+                .sorted(comparatorDataHoraDesc())
                 .limit(10)
                 .collect(Collectors.toList());
     }
@@ -1021,23 +1082,25 @@ public class RadarsBFFService {
 
     private List<RadarLocationDTO> fetchLocationsFromMicroservices(String baseUrl) {
         String url = "http://" + baseUrl + "/radares/all-locations";
-        log.info("BFF chamando locations: {}", url);
+        log.info("📡 [BFF] Chamando locations: {}", url);
 
         return circuitBreakerFactory.create("locationsService").run(
                 () -> {
-                    // 1. Busca como JsonNode genérico para o RestTemplate padrão não quebrar com campos extras
-                    ResponseEntity<JsonNode> response = loadBalancedRestTemplate.exchange(
-                            url, HttpMethod.GET, null, JsonNode.class);
+                    // 1. O RestTemplate mapeia a Lista diretamente de forma segura
+                    // Requisito: A classe RadarLocationDTO deve ter @JsonIgnoreProperties(ignoreUnknown = true)
+                    ResponseEntity<List<RadarLocationDTO>> response = loadBalancedRestTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            null,
+                            new ParameterizedTypeReference<List<RadarLocationDTO>>() {}
+                    );
 
-                    JsonNode body = response.getBody();
-                    List<RadarLocationDTO> results = new ArrayList<>();
-
-                    // 2. Converte usando o MAPPER customizado do BFF (que ignora propriedades desconhecidas)
-                    if (body != null && body.isArray()) {
-                        results = MAPPER.convertValue(body, new TypeReference<List<RadarLocationDTO>>() {});
+                    List<RadarLocationDTO> results = response.getBody();
+                    if (results == null) {
+                        results = new ArrayList<>();
                     }
 
-                    // 3. Blindagem de segurança: Garante a concessionária correta
+                    // 2. Blindagem de segurança: Garante a concessionária correta
                     String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
                     for (RadarLocationDTO r : results) {
                         if (r.getConcessionaria() == null || r.getConcessionaria().isBlank()) {
@@ -1045,7 +1108,7 @@ public class RadarsBFFService {
                         }
                     }
 
-                    // 4. Salva no cache de resiliência se a chamada foi um sucesso
+                    // 3. Salva no cache de resiliência se a chamada foi um sucesso
                     if (!results.isEmpty()) {
                         locationsFallbackCache.put(baseUrl, results);
                     }
@@ -1053,9 +1116,10 @@ public class RadarsBFFService {
                     return results;
                 },
                 throwable -> {
-                    // 5. Fallback seguro
+                    // 4. Fallback seguro
                     List<RadarLocationDTO> cachedData = locationsFallbackCache.getOrDefault(baseUrl, Collections.emptyList());
 
+                    // Corrigido os caracteres inválidos '??' para um emoji de alerta '⚠️' para manter os logs limpos no Linux
                     log.warn("⚠️ [Circuit Breaker FALLBACK] Falha ao processar {}: {}. Retornando {} registros salvos em cache.",
                             baseUrl, throwable.getMessage(), cachedData.size());
 
@@ -1080,7 +1144,7 @@ public class RadarsBFFService {
                 String id = String.valueOf(recente.getId());
                 if (!id.equals(ultimoIdRondonEnviado)) {
                     ultimoIdRondonEnviado = id;
-                    log.info("⏰ [Scheduler] Nova passagem da Rondon (Placa: {} - Data: {})", recente.getPlaca(), recente.getData());
+                    log.info("⏰ [Scheduler] Nova passagem da Rondon (Placa: {} - Data: {} - Hora: {})", recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
             }
@@ -1103,12 +1167,38 @@ public class RadarsBFFService {
                 String id = String.valueOf(recente.getId());
                 if (!id.equals(ultimoIdMonitoraSPEnviado)) {
                     ultimoIdMonitoraSPEnviado = id;
-                    log.info("⏰ [Scheduler] Nova passagem do MonitoraSP (Placa: {})", recente.getPlaca());
+                    log.info("⏰ [Scheduler] Nova passagem do MonitoraSP (Placa: {} - Dia: {} - Hora: {})", recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
             }
         } catch (Exception e) {
             log.debug("⚠️ [Scheduler] Aguardando disponibilidade do MonitoraSP...");
+        }
+    }
+
+    @Scheduled(fixedDelay = 60000)
+    public void atualizarEntreviasNoPainel() {
+        String baseUrl = serviceUrlMap.get("entrevias");
+        if (baseUrl == null) return;
+
+        try {
+            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class);
+
+            if (resp.getBody() != null && resp.getBody().length > 0) {
+                RadarDTO recente = resp.getBody()[0];
+                String id = String.valueOf(recente.getId());
+
+                // Adicione este campo 'ultimoIdEntreviasEnviado' no topo da classe como volatile String
+                if (!id.equals(ultimoIdEntreviasEnviado)) {
+                    ultimoIdEntreviasEnviado = id;
+                    log.info("⭐ [Scheduler] Nova passagem da Entrevias (Placa: {} - Data: {} - Hora: {})",
+                            recente.getPlaca(), recente.getData(), recente.getHora());
+                    messagingTemplate.convertAndSend("/topic/last-radar", recente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da Entrevias...");
         }
     }
 
@@ -1184,45 +1274,89 @@ public class RadarsBFFService {
             List<String> concessionarias, LocalDate data, LocalTime horaInicial, LocalTime horaFinal,
             String rodovia, String praca, String km, String sentido, Pageable pageable) {
 
-        // 1. Faz a busca normal nos microserviços de radares
+        // 1. Faz a busca super rápida nos microserviços de radares
         RadarPageDTO pagina = buscarPorLocal(concessionarias, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable);
 
-        // 2. Enriquece a página de resultados com dados do Detran paralelamente
+        // 2. Enriquece a página de forma SEGURA e CONTROLADA
         if (pagina.getContent() != null && !pagina.getContent().isEmpty()) {
+
+            // Isola placas únicas para não consultar o mesmo carro duas vezes na mesma página
+            Set<String> placasUnicas = pagina.getContent().stream()
+                    .map(RadarDTO::getPlaca)
+                    .filter(p -> p != null && !p.isBlank())
+                    .collect(Collectors.toSet());
+
+            ConcurrentHashMap<String, JsonNode> dadosDetranMap = new ConcurrentHashMap<>();
+
             try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-                for (RadarDTO radar : pagina.getContent()) {
-                    if (radar.getPlaca() != null && !radar.getPlaca().isEmpty()) {
-                        futures.add(CompletableFuture.runAsync(() -> {
-                            JsonNode dadosDetran = detranService.consultarVeiculo(radar.getPlaca());
+                for (String placaUnica : placasUnicas) {
+                    futures.add(CompletableFuture.runAsync(() -> {
+                        try {
+                            // 🚦 SEMÁFORO APLICADO AQUI TAMBÉM!
+                            detranRateLimiter.acquire();
 
+                            JsonNode dadosDetran = detranService.consultarVeiculo(placaUnica);
                             if (dadosDetran != null) {
-                                String marcaModelo = dadosDetran.hasNonNull("marca") && dadosDetran.get("marca").hasNonNull("descricao")
-                                        ? dadosDetran.get("marca").get("descricao").asText() : "N/I";
-
-                                String cor = dadosDetran.hasNonNull("cor") && dadosDetran.get("cor").hasNonNull("descricao")
-                                        ? dadosDetran.get("cor").get("descricao").asText() : "N/I";
-
-                                String municipio = dadosDetran.hasNonNull("municipio") && dadosDetran.get("municipio").hasNonNull("nome")
-                                        ? dadosDetran.get("municipio").get("nome").asText() : "N/I";
-
-                                radar.setMarcaModelo(marcaModelo);
-                                radar.setCor(cor);
-                                radar.setMunicipio(municipio);
-                            } else {
-                                radar.setMarcaModelo("Não Encontrado");
-                                radar.setCor("Não Encontrado");
-                                radar.setMunicipio("Não Encontrado");
+                                dadosDetranMap.put(placaUnica, dadosDetran);
                             }
-                        }, executor));
-                    }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            log.error("Thread interrompida ao buscar Detran para placa: {}", placaUnica);
+                        } finally {
+                            detranRateLimiter.release();
+                        }
+                    }, executor));
                 }
-                // Aguarda todas as chamadas do Detran terminarem antes de devolver a página
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            }
+
+            // 3. Costura os dados híbridos de volta nos DTOs da página
+            for (RadarDTO radar : pagina.getContent()) {
+                JsonNode dados = dadosDetranMap.get(radar.getPlaca());
+
+                if (dados != null) {
+                    radar.setMarcaModelo(extrairCampoHibrido(dados, "marca", "descricao"));
+                    radar.setCor(extrairCampoHibrido(dados, "cor", "descricao"));
+                    radar.setMunicipio(extrairCampoHibrido(dados, "municipio", "nome"));
+                    radar.setUf(dados.hasNonNull("uf") ? dados.get("uf").asText() : "N/I");
+                    radar.setAnoModelo(dados.hasNonNull("anoModelo") ? dados.get("anoModelo").asText() : "N/I");
+
+                    if (dados.hasNonNull("proprietario")) {
+                        JsonNode propNode = dados.get("proprietario");
+                        if (propNode.isObject()) {
+                            radar.setNomeProprietario(propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I");
+                            radar.setCpfProprietario(propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I");
+                        } else if (propNode.isTextual()) {
+                            radar.setNomeProprietario(propNode.asText());
+                            radar.setCpfProprietario(dados.hasNonNull("proprietarioNumeroDocumento") ? dados.get("proprietarioNumeroDocumento").asText() : "N/I");
+                        }
+                    } else {
+                        radar.setNomeProprietario("N/I");
+                        radar.setCpfProprietario("N/I");
+                    }
+                } else {
+                    radar.setMarcaModelo("N/I");
+                    radar.setCor("N/I");
+                    radar.setMunicipio("N/I");
+                    radar.setUf("N/I");
+                    radar.setAnoModelo("N/I");
+                    radar.setNomeProprietario("Não Encontrado");
+                    radar.setCpfProprietario("Não Encontrado");
+                }
             }
         }
 
         return pagina;
+    }
+
+    private String extrairCampoHibrido(JsonNode root, String campo, String subCampo) {
+        if (!root.hasNonNull(campo)) return "N/I";
+        JsonNode node = root.get(campo);
+        if (node.isObject() && node.hasNonNull(subCampo)) {
+            return node.get(subCampo).asText(); // Formato Objeto (v3)
+        }
+        return node.asText(); // Formato Texto Direto (v1)
     }
 }

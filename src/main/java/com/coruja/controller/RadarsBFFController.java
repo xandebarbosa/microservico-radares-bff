@@ -17,7 +17,9 @@ import org.springframework.web.client.HttpClientErrorException;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 @RestController
@@ -51,19 +53,15 @@ public class RadarsBFFController {
         try {
             return ResponseEntity.ok(radarsBFFService.buscarPorPlaca(termoBusca, pageable));
 
-        } catch (HttpClientErrorException e) {
-            log.warn("⚠️ [BFF] Erro HTTP {}: {}", e.getStatusCode(), e.getMessage());
-
-            // .value() == 404 evita problema de tipo HttpStatusCode vs HttpStatus
-            HttpStatus status = e.getStatusCode().value() == 404
-                    ? HttpStatus.NOT_FOUND
-                    : HttpStatus.SERVICE_UNAVAILABLE;
-
-            return ResponseEntity.status(status).body(emptyPage);
-
         } catch (Exception e) {
-            log.error("🔥 [BFF] Erro ao processar busca por placa: {}", e.getMessage());
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(emptyPage);
+            // LOG DETALHADO: Isso vai mostrar a linha exata do erro no terminal do seu Ubuntu
+            log.error("🔥 [BFF] Erro fatal na busca: ", e);
+
+            Map<String, Object> errorDetails = new HashMap<>();
+            errorDetails.put("message", "Erro ao processar busca por placa");
+            errorDetails.put("details", e.getMessage());
+
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body((RadarPageDTO) errorDetails);
         }
     }
 

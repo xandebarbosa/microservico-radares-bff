@@ -29,5 +29,8 @@ public class RadarDTO {
     private String marcaModelo;
     private String cor;
     private String municipio;
-
+    private String uf;
+    private String anoModelo;
+    private String nomeProprietario;
+    private String cpfProprietario;
 }

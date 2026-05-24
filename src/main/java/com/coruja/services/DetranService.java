@@ -4,9 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.http.*;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -34,7 +37,7 @@ public class DetranService {
     @Value("${detran.api.client-secret}")
     private String clientSecret;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Variáveis de controle de Cache do Token
@@ -43,101 +46,129 @@ public class DetranService {
 
     private volatile LocalDateTime mainframeBloqueadoAte = null;
 
+    private static final Object TOKEN_LOCK = new Object();
+
     /**
-     * Obtém o token. Reutiliza o token salvo em memória se ainda estiver dentro do tempo de validade.
+     * Construtor: Inicializa o RestTemplate com proteção contra Timeout infinito.
      */
-    private synchronized String obterToken() {
+    public DetranService() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(3000); // 3 segundos máximo para handshake
+        factory.setReadTimeout(5000);    // 5 segundos máximo esperando payload do veículo
+
+        this.restTemplate = new RestTemplate(factory);
+    }
+
+    /**
+     * Obtém o token. Reutiliza o token salvo em memória se ainda estiver dentro da validade.
+     */
+    private String obterToken() {
+        // Primeiro Check (Sem Lock): Se o token está válido, devolve imediatamente em alta performance
         if (currentToken != null && tokenExpirationTime != null && LocalDateTime.now().isBefore(tokenExpirationTime.minusMinutes(1))) {
             return currentToken;
         }
 
-        log.info("🔑 Gerando novo token na API do Detran (IDP.SP.GOV.BR)...");
-        try {
-            String safeClientId = clientId != null ? clientId.trim() : "";
-            String safeClientSecret = clientSecret != null ? clientSecret.trim() : "";
-
-            // O novo Keycloak (idp.sp.gov.br) precisa do grant_type e das credenciais no formato form-urlencoded
-            String formBody = "grant_type=client_credentials" +
-                    "&client_id=" + URLEncoder.encode(safeClientId, StandardCharsets.UTF_8) +
-                    "&client_secret=" + URLEncoder.encode(safeClientSecret, StandardCharsets.UTF_8) +
-                    "&scope=" + URLEncoder.encode("api:detran.veiculos.search", StandardCharsets.UTF_8);
-
-            HttpClient client = HttpClient.newHttpClient();
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(authUrl))
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .header("Accept", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(formBody))
-                    .build();
-
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 200) {
-                JsonNode jsonNode = objectMapper.readTree(response.body());
-                if (jsonNode.has("access_token")) {
-                    currentToken = jsonNode.get("access_token").asText();
-                    int expiresIn = jsonNode.has("expires_in") ? jsonNode.get("expires_in").asInt() : 3600;
-                    tokenExpirationTime = LocalDateTime.now().plusSeconds(expiresIn);
-
-                    log.info("✅ Novo token do Detran gerado com sucesso. Válido por {} segundos.", expiresIn);
-                    return currentToken;
-                }
-            } else {
-                log.error("❌ Erro HTTP ao gerar token na API do Detran: Status {} - Resposta: {}", response.statusCode(), response.body());
+        // Segundo Check (Com Lock): Se precisa gerar, as threads entram em fila organizada aqui
+        synchronized (TOKEN_LOCK) {
+            // Double-Checked Locking Pattern: A primeira thread da fila gera o token.
+            // As próximas que entrarem aqui vão ler o token já gerado pela primeira e pular o bloco POST.
+            if (currentToken != null && tokenExpirationTime != null && LocalDateTime.now().isBefore(tokenExpirationTime.minusMinutes(1))) {
+                return currentToken;
             }
-        } catch (Exception e) {
-            log.error("❌ Erro na requisição do token do Detran: {}", e.getMessage());
+
+            log.info("🔑 [Detran - Concorrência] Thread autorizada a gerar novo token na API do Detran (IDP.SP.GOV.BR)...");
+            try {
+                String safeClientId = clientId != null ? clientId.trim() : "";
+                String safeClientSecret = clientSecret != null ? clientSecret.trim() : "";
+
+                String formBody = "grant_type=client_credentials" +
+                        "&client_id=" + URLEncoder.encode(safeClientId, StandardCharsets.UTF_8) +
+                        "&client_secret=" + URLEncoder.encode(safeClientSecret, StandardCharsets.UTF_8) +
+                        "&scope=" + URLEncoder.encode("api:detran.veiculos.search", StandardCharsets.UTF_8);
+
+                HttpClient client = HttpClient.newHttpClient();
+
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(authUrl))
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .header("Accept", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(formBody))
+                        .build();
+
+                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+                if (response.statusCode() == 200) {
+                    JsonNode jsonNode = objectMapper.readTree(response.body());
+                    if (jsonNode.has("access_token")) {
+                        currentToken = jsonNode.get("access_token").asText();
+                        int expiresIn = jsonNode.has("expires_in") ? jsonNode.get("expires_in").asInt() : 3600;
+                        tokenExpirationTime = LocalDateTime.now().plusSeconds(expiresIn);
+
+                        log.info("✅ [Detran] Novo token gerado com sucesso global pelas Virtual Threads. Válido por {} segundos.", expiresIn);
+                        return currentToken;
+                    }
+                } else {
+                    log.error("❌ Erro HTTP ao gerar token na API do Detran: Status {} - Resposta: {}", response.statusCode(), response.body());
+                }
+            } catch (Exception e) {
+                log.error("❌ Erro crítico na requisição concorrente do token do Detran: {}", e.getMessage());
+            }
+            return null;
         }
-        return null;
     }
 
     /**
-     * Consulta os dados de um veículo específico na API do Detran.
+     * Consulta os dados de um veículo de forma híbrida e resiliente.
      */
+    @Cacheable(value = "cache-detran-placas", key = "#placa", unless = "#result == null")
     public JsonNode consultarVeiculo(String placa) {
-        // Cria um snapshot da variável volátil para a memória desta Thread.
-        // Isso previne a Race Condition (TOCTOU) e garante Thread-Safety no paralelismo.
         LocalDateTime bloqueioAtual = this.mainframeBloqueadoAte;
 
         if (bloqueioAtual != null) {
             if (LocalDateTime.now().isBefore(bloqueioAtual)) {
-                log.warn("⚠️ Consulta ignorada para {}: Mainframe do Detran em período de bloqueio.", placa);
-                return null; // Retorna nulo imediatamente sem travar a thread
+                log.warn("🛑 Consulta ignorada para {}: Mainframe do Detran em período de bloqueio por instabilidade.", placa);
+                return null;
             } else {
-                // O período de bloqueio de 2 minutos já passou, podemos limpar com segurança.
                 this.mainframeBloqueadoAte = null;
             }
         }
 
         String token = obterToken();
         if (token == null) {
-            log.warn("Falha na autenticação: Não foi possível obter o token do Detran para consultar a placa {}", placa);
+            log.warn("❌ Falha na autenticação: Não foi possível obter o token do Detran para consultar a placa {}", placa);
             return null;
         }
 
+        // 1ª Tentativa: Base do Estado de São Paulo (v3)
         try {
-            // 1ª Tentativa: Base do Estado de São Paulo (v3)
+            log.info("📡 [Detran] Tentando Base SP (v3) para placa: {}", placa);
             return realizarConsultaGet(placa, "/v3/dados", token);
-
-        } catch (HttpClientErrorException.NotFound e) {
-            log.info("Placa {} não encontrada na base SP (v3). Buscando na base Nacional (v1)...", placa);
-
-            try {
-                // 2ª Tentativa: Base Nacional - Outros Estados (v1)
-                return realizarConsultaGet(placa, "/v1/dados", token);
-
-            } catch (Exception ex) {
-                return tratarErroConsulta(placa, ex);
-            }
-
         } catch (Exception e) {
-            return tratarErroConsulta(placa, e);
+            log.warn("⚠️ Falha na base SP (v3) para a placa {}: {}. Roteando para a Base Nacional (v1)...", placa, e.getMessage());
+
+            // Se o token foi rejeitado na v3, limpa para a próxima execução por segurança
+            verificarSeTokenExpirou(e);
+        }
+
+        // 2ª Tentativa: Base Nacional (v1) - Acionada se a v3 der 404, Timeout ou 500 do governo
+        try {
+            log.info("📡 [Detran] Tentando Base Nacional (v1) para placa: {}", placa);
+            return realizarConsultaGet(placa, "/v1/dados", token);
+        } catch (Exception e) {
+            // Se ambas as bases falharem, centraliza e ativa o circuito de proteção se necessário
+            return tratarErroFinalConsulta(placa, e);
+        }
+    }
+
+    private void verificarSeTokenExpirou(Exception e) {
+        if (e instanceof HttpStatusCodeException && ((HttpStatusCodeException) e).getStatusCode() == HttpStatus.UNAUTHORIZED) {
+            log.warn("🔄 Token do Detran rejeitado (401). Forçando renovação no próximo ciclo.");
+            this.currentToken = null;
         }
     }
 
     /**
-     * Método auxiliar para evitar repetição de código na montagem e envio da requisição GET
+     * Realiza o envio da requisição HTTP GET de forma segura.
      */
     private JsonNode realizarConsultaGet(String placa, String endpoint, String token) {
         HttpHeaders headers = new HttpHeaders();
@@ -159,36 +190,49 @@ public class DetranService {
 
         JsonNode responseBody = response.getBody();
 
-        // Retorna o primeiro objeto do Array
-        if (responseBody != null && responseBody.isArray() && !responseBody.isEmpty()) {
-            return responseBody.get(0);
+        if (responseBody != null) {
+            // Se for Lista (Padrão v3 SP)
+            if (responseBody.isArray() && !responseBody.isEmpty()) {
+                return responseBody.get(0);
+            }
+            // Se for Objeto direto (Padrão v1 Nacional)
+            else if (responseBody.isObject()) {
+                return responseBody;
+            }
         }
 
+        log.warn("⚠️ Formato de resposta inesperado do Detran para a placa {}: {}", placa, responseBody);
         return null;
     }
 
     /**
-     * Centraliza o tratamento de erros HTTP e renovação do Token
+     * Centraliza o tratamento final das falhas após esgotar as duas bases de dados.
      */
-    private JsonNode tratarErroConsulta(String placa, Exception e) {
-        // Se for um Erro 404 da Base Nacional, apenas logamos como Info em vez de Error
-        if (e instanceof HttpClientErrorException.NotFound) {
-            log.info("Placa {} não encontrada em nenhuma das bases do Detran (SP ou Nacional).", placa);
-            return null;
+    private JsonNode tratarErroFinalConsulta(String placa, Exception e) {
+        if (e instanceof HttpStatusCodeException) {
+            HttpStatusCodeException httpError = (HttpStatusCodeException) e;
+
+            if (httpError.getStatusCode() == HttpStatus.NOT_FOUND) {
+                log.info("ℹ️ Placa {} não encontrada em nenhuma das bases do Detran (SP ou Nacional).", placa);
+                return null;
+            }
+
+            if (httpError.getStatusCode() == HttpStatus.UNAUTHORIZED) {
+                this.currentToken = null;
+            }
+
+            log.error("❌ Detran retornou erro HTTP {} para a placa {}: {}", httpError.getStatusCode(), placa, httpError.getResponseBodyAsString());
+        } else if (e instanceof ResourceAccessException) {
+            log.error("🔌 Timeout ou falha física de rede ao conectar na API do Detran para a placa {}: {}", placa, e.getMessage());
+        } else {
+            log.error("❌ Erro inesperado na API do Detran para a placa {}: {}", placa, e.getMessage());
         }
 
-        log.error("Erro ao buscar dados da placa {} no Detran: {}", placa, e.getMessage());
-
-        // Se a API do Detran rejeitar o token (401), invalidamos ele para forçar a geração de um novo
-        if (e.getMessage() != null && e.getMessage().contains("401")) {
-            log.warn("⚠️ Token do Detran invalidado. Forçando renovação.");
-            this.currentToken = null;
-        }
-
-        // NOVA LÓGICA: Se for erro de Mainframe (500 ou ConnectionException), bloqueia novas tentativas por 2 minutos
-        if (e.getMessage() != null && (e.getMessage().contains("500") || e.getMessage().contains("ConnectionException"))) {
-            log.warn("🚨 Detran Mainframe indisponível! Suspendendo consultas por 1 minutos para evitar timeouts em cascata.");
-            this.mainframeBloqueadoAte = LocalDateTime.now().minusMinutes(1);
+        // Ativa o circuito de proteção se o governo de SP e o Nacional caírem juntos ou derem Timeout
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        if (msg.contains("500") || msg.contains("timeout") || msg.contains("connection") || e instanceof ResourceAccessException) {
+            log.warn("🚨 API do Detran instável ou indisponível. Suspendendo novas chamadas externas por 1 minuto.");
+            this.mainframeBloqueadoAte = LocalDateTime.now().plusMinutes(1);
         }
 
         return null;
