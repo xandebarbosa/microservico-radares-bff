@@ -1,9 +1,12 @@
 package com.coruja.services;
 
+import com.coruja.dto.RadarDTO;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -23,10 +26,14 @@ import java.util.concurrent.Executors;
 public class AnaliseBFFService {
 
     @Autowired
-    private RestTemplate loadBalancedRestTemplate;
+    @Qualifier("analysisRestTemplate")
+    private RestTemplate analysisRestTemplate;
 
     @Autowired
     private DetranService detranService;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private static final String ANALISE_SERVICE_NAME = "MICROSERVICO-ANALISE-INTELIGENTE";
 
@@ -50,7 +57,7 @@ public class AnaliseBFFService {
             }
             HttpEntity<String> entity = new HttpEntity<>(headers);
 
-            ResponseEntity<JsonNode> response = loadBalancedRestTemplate.exchange(url, HttpMethod.GET, entity, JsonNode.class);
+            ResponseEntity<JsonNode> response = analysisRestTemplate.exchange(url, HttpMethod.GET, entity, JsonNode.class);
             JsonNode resultados = response.getBody();
 
             // Aplica o enriquecimento inteligente também na busca automática
@@ -63,7 +70,7 @@ public class AnaliseBFFService {
     }
 
     public JsonNode buscarComboioPorPassagens(JsonNode requestBody) {
-        log.info("📡 [BFF] Repassando análise de comboio avançada (por passagens selecionadas)...");
+        log.info("🎯 [BFF] Repassando JSON estruturado do React diretamente para o Quarkus...");
 
         String url = "http://" + ANALISE_SERVICE_NAME + "/analise/comboio/passagens";
 
@@ -75,20 +82,22 @@ public class AnaliseBFFService {
             if (authHeader != null) headers.set("Authorization", authHeader);
             headers.setContentType(MediaType.APPLICATION_JSON);
 
+            // 💡 A SOLUÇÃO FINAL: Como o React já manda os campos "data" e "hora" corretos,
+            // passamos o JsonNode direto. O RestTemplate faz a serialização JSON nativa perfeita!
             HttpEntity<JsonNode> entity = new HttpEntity<>(requestBody, headers);
 
-            ResponseEntity<JsonNode> response = loadBalancedRestTemplate.exchange(url, HttpMethod.POST, entity, JsonNode.class);
+            ResponseEntity<JsonNode> response = analysisRestTemplate.exchange(url, HttpMethod.POST, entity, JsonNode.class);
             JsonNode resultados = response.getBody();
 
             return enriquecerComDadosDoDetran(resultados);
 
         } catch (Exception e) {
-            log.error("❌ [BFF] Erro ao comunicar com o serviço de Análise: {}", e.getMessage());
+            log.error("❌ [BFF] Erro ao comunicar com o serviço de Análise Inteligente: {}", e.getMessage());
             throw new RuntimeException("Falha ao analisar comboio avançado: " + e.getMessage());
         }
     }
 
-    /**
+    /**https://gemini.google.com/app/09d6d4fb3484a428
      * Recebe a lista de suspeitos da IA e injeta os dados do Detran de forma reativa e híbrida
      */
     private JsonNode enriquecerComDadosDoDetran(JsonNode resultados) {

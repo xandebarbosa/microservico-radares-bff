@@ -7,75 +7,68 @@ import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
-import org.springframework.http.client.ClientHttpRequestFactory;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
-import java.util.List;
 
 /**
- * Configuração do RestTemplate para chamadas aos microserviços.
- * Substitui o WebClient para remover a dependência do WebFlux.
+ * Configuração centralizada e blindada dos clientes HTTP para comunicação entre microsserviços.
  */
 @Configuration
 public class RestTemplateConfig {
 
     /**
-     * RestTemplate PRINCIPAL (com Load Balancing).
-     * Usado quando chamamos serviços pelo nome (ex: http://MICROSERVICO-RADARES).
+     * RestTemplate PRINCIPAL (Com Load Balancing do Eureka).
+     * Injeta automaticamente o ObjectMapper e protege as threads do BFF com timeouts adequados.
      */
     @Bean
-    @LoadBalanced
     @Primary
-    public RestTemplate restTemplate() {
-        return createRestTemplate();
-    }
-
-    @Bean
-    @LoadBalanced // Essencial para resolver o nome do serviço no Eureka
-    public RestTemplate loadBalancedRestTemplate() {
-        return new RestTemplate();
+    @LoadBalanced
+    public RestTemplate loadBalancedRestTemplate(RestTemplateBuilder builder) {
+        return builder
+                // 5 segundos é tempo de sobra para estabelecer conexão na rede interna do Docker
+                .setConnectTimeout(Duration.ofSeconds(5))
+                // 🚀 A MÁGICA AQUI: Aumentamos de 14s para 60s.
+                // Isso dá fôlego para o MongoDB (Rondon) processar a Análise de Comboio sem quebrar a conexão!
+                .setReadTimeout(Duration.ofSeconds(60))
+                .build();
     }
 
     /**
-     * RestTemplate DIRETO (sem Load Balancing).
-     * Usado quando chamamos URLs fixas (ex: http://host.docker.internal:8089 ou http://google.com).
+     * RestTemplate DIRETO (Sem Load Balancing).
+     * Utilizado para chamadas externas (APIs de terceiros, Detran, webhooks).
      */
     @Bean("directRestTemplate")
-    public RestTemplate directRestTemplate() {
-        return createRestTemplate();
+    public RestTemplate directRestTemplate(RestTemplateBuilder builder) {
+        return builder
+                .setConnectTimeout(Duration.ofSeconds(10))
+                .setReadTimeout(Duration.ofSeconds(30))
+                .build();
     }
 
-    // Método auxiliar para não duplicar configuração
-    private RestTemplate createRestTemplate() {
-        RestTemplate restTemplate = new RestTemplate(clientHttpRequestFactory());
-
-        MappingJackson2HttpMessageConverter jacksonConverter =
-                new MappingJackson2HttpMessageConverter();
-        jacksonConverter.setObjectMapper(objectMapper());
-
-        // CORRETO: adiciona Jackson no início mantendo os outros converters
-        // (StringHttpMessageConverter, ByteArrayHttpMessageConverter, etc.)
-        restTemplate.getMessageConverters().addFirst(jacksonConverter);
-
-        return restTemplate;
-    }
-
+    /**
+     * Configuração global do Jackson para serialização correta de Datas ISO 8601.
+     * O @Primary garante que tanto o Spring MVC quanto os RestTemplates usem esta mesma instância.
+     */
     @Bean
-    public ClientHttpRequestFactory clientHttpRequestFactory() {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(60000);
-        factory.setReadTimeout(300000); // 🚀 AUMENTADO: 5 minutos (300.000 ms) para ler os dados pesados
-        return factory;
-    }
-
-    @Bean
+    @Primary
     public ObjectMapper objectMapper() {
         ObjectMapper mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         return mapper;
     }
 
+    /**
+     * RestTemplate exclusivo para Análises Pesadas e Inteligência Artificial.
+     * Possui um timeout longo (2 minutos) para permitir o cruzamento de milhares de placas.
+     */
+    @Bean("analysisRestTemplate")
+    @LoadBalanced
+    public RestTemplate analysisRestTemplate(RestTemplateBuilder builder) {
+        return builder
+                .setConnectTimeout(Duration.ofSeconds(10))
+                // Damos 120 segundos (2 minutos) de paciência para o Quarkus cruzar os dados
+                .setReadTimeout(Duration.ofSeconds(120))
+                .build();
+    }
 }

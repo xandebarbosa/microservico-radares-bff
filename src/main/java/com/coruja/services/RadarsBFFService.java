@@ -48,7 +48,7 @@ public class RadarsBFFService {
             .configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, false);
 
     // ─── Constantes ─────────────────────────────────────────────────────────────
-    private static final long   REQUEST_TIMEOUT_SECONDS = 5;  //REQUEST_TIMEOUT_SECONDS
+    private static final long   REQUEST_TIMEOUT_SECONDS = 65;  //REQUEST_TIMEOUT_SECONDS
     private static final int    PAGE_SIZE_EXPORTACAO     = 1000;
 
     // ─── Dependências ───────────────────────────────────────────────────────────
@@ -110,6 +110,7 @@ public class RadarsBFFService {
         serviceUrlMap.put("entrevias",  "MICROSERVICO-RADARES-ENTREVIAS");
         serviceUrlMap.put("rondon",     "MICROSERVICO-RADARES-RONDON");
         serviceUrlMap.put("monitorasp", "MICROSERVICO-RADARES-MONITORASP");
+        serviceUrlMap.put("spvias", "MICROSERVICO-RADARES-SPVIAS");
 
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
@@ -127,37 +128,40 @@ public class RadarsBFFService {
         List<String> urls = new ArrayList<>(serviceUrlMap.values());
         if (urls.isEmpty()) return paginaVazia(pageable);
 
+        // 🚀 Passo 1: Dispara a busca do Detran em PARALELO com os radares
+        CompletableFuture<JsonNode> futuroDetran = CompletableFuture.supplyAsync(() -> {
+            try {
+                detranRateLimiter.acquire();
+                return detranService.consultarVeiculo(placa);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } finally {
+                detranRateLimiter.release();
+            }
+        }, executorService);
+
+        // Passo 2: Dispara as buscas nos microsserviços de radares
         List<CompletableFuture<RadarPageDTO>> futures = urls.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
                         () -> fetchPlacaFromMicroservice(baseUrl, placa, pageable), executorService))
                 .toList();
 
-        RadarPageDTO pagina = aggregateGlobalPages(collectFutures(futures), pageable);
+        // Aguarda os radares respeitando o timeout
+        RadarPageDTO pagina = aggregateBuscaPlaca(collectFutures(futures), pageable);
 
-        // 🔥 NOVO: ENRIQUECIMENTO COM DADOS DO DETRAN USANDO O SEMÁFORO GLOBAL
+        // Passo 3: Costura os dados do Detran assim que os radares e o Detran terminarem
         if (pagina.getContent() != null && !pagina.getContent().isEmpty()) {
             JsonNode dadosDetran = null;
-
             try {
-                // 🚦 Proteção de concorrência: Respeita o limite global da API do governo
-                detranRateLimiter.acquire();
-                dadosDetran = detranService.consultarVeiculo(placa);
-            } catch (InterruptedException e) {
-                log.error("Thread interrompida ao aguardar semáforo do Detran para a placa {}", placa);
-                Thread.currentThread().interrupt();
-            } finally {
-                // 🚦 Libera a catraca independentemente de sucesso ou falha
-                detranRateLimiter.release();
+                // Aguarda o Detran por no máximo 4 segundos para não atrasar a resposta da tela
+                dadosDetran = futuroDetran.get(4, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                log.warn("⚠️ [BFF] Detran demorou muito para responder, aplicando valores padrão N/I.");
             }
 
-            // Valores padrão consistentes com o resto do sistema
-            String marcaModelo = "N/I";
-            String cor = "N/I";
-            String municipio = "N/I";
-            String uf = "N/I";
-            String anoModelo = "N/I";
-            String nomeProprietario = "N/I";
-            String cpfProprietario = "N/I";
+            String marcaModelo = "N/I", cor = "N/I", municipio = "N/I", uf = "N/I",
+                    anoModelo = "N/I", nomeProprietario = "N/I", cpfProprietario = "N/I";
 
             if (dadosDetran != null) {
                 marcaModelo = extrairCampoHibrido(dadosDetran, "marca", "descricao");
@@ -166,25 +170,18 @@ public class RadarsBFFService {
                 uf = dadosDetran.hasNonNull("uf") ? dadosDetran.get("uf").asText() : "N/I";
                 anoModelo = dadosDetran.hasNonNull("anoModelo") ? dadosDetran.get("anoModelo").asText() : "N/I";
 
-                // 🔄 LÓGICA HÍBRIDA PARA O PROPRIETÁRIO (v1 e v3)
                 if (dadosDetran.hasNonNull("proprietario")) {
                     JsonNode propNode = dadosDetran.get("proprietario");
-
-                    // Se for formato v1 (Objeto aninhado)
                     if (propNode.isObject()) {
                         nomeProprietario = propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I";
                         cpfProprietario = propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I";
-                    }
-                    // Se for formato v3 (String e chaves separadas)
-                    else if (propNode.isTextual()) {
+                    } else if (propNode.isTextual()) {
                         nomeProprietario = propNode.asText();
-                        cpfProprietario = dadosDetran.hasNonNull("proprietarioNumeroDocumento")
-                                ? dadosDetran.get("proprietarioNumeroDocumento").asText() : "N/I";
+                        cpfProprietario = dadosDetran.hasNonNull("proprietarioNumeroDocumento") ? dadosDetran.get("proprietarioNumeroDocumento").asText() : "N/I";
                     }
                 }
             }
 
-            // Aplica os mesmos dados extraídos para todo o histórico de passagens dessa placa na página
             for (RadarDTO radar : pagina.getContent()) {
                 radar.setMarcaModelo(marcaModelo);
                 radar.setCor(cor);
@@ -201,10 +198,13 @@ public class RadarsBFFService {
 
     private RadarPageDTO fetchPlacaFromMicroservice(String baseUrl, String placa, Pageable pageable) {
         try {
+            // SOLUÇÃO: Ignoramos a paginação do utilizador na chamada aos microsserviços.
+            // Pedimos sempre a página 0 com 1000 resultados para garantir que temos
+            // dados suficientes para fazer a ordenação global e a paginação em memória de forma exata.
             URI uri = UriComponentsBuilder.fromUriString("http://" + baseUrl + "/radares/busca-placa")
                     .queryParam("placa", placa)
-                    .queryParam("page", pageable.getPageNumber()) // 🔹 Corrigido para repassar a página solicitada
-                    .queryParam("size", pageable.getPageSize())
+                    .queryParam("page", 0)
+                    .queryParam("size", 1000)
                     .queryParam("sort", "data,desc")
                     .queryParam("sort", "hora,desc")
                     .build().encode().toUri();
@@ -277,7 +277,7 @@ public class RadarsBFFService {
                     .queryParam("page", pageable.getPageNumber())
                     .queryParam("size", pageable.getPageSize());
 
-            String urlFinal = builder.toUriString();
+            URI urlFinal = builder.build().encode().toUri();
             log.info("📡 [BFF Local] Chamando: {}", urlFinal);
 
             String cbName = "radaresLocal-" + baseUrl.toLowerCase().replace("microservico-radares-", "");
@@ -439,7 +439,7 @@ public class RadarsBFFService {
 
         List<RadarDTO> all = futures.stream()
                 .map(f -> {
-                    try { return f.get(5, TimeUnit.MINUTES); }
+                        try { return f.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.MINUTES); }
                     catch (Exception e) {
                         log.error("Erro geo exportação: {}", e.toString());
                         return Collections.<RadarDTO>emptyList();
@@ -626,47 +626,52 @@ public class RadarsBFFService {
     private List<RadarDTO> fetchUltimosFromDatabase() {
         List<RadarDTO> todos = new ArrayList<>();
 
-        // 1. Monitoramento legado (Cart, Eixo, Entrevias)
+        // 1. Monitoramento legado (Cart, Eixo)
         try {
+            // A URL montada aqui deve apontar para o nome do container (ex: http://monitoramento:8089)
             ResponseEntity<List<RadarDTO>> resp = monitoramentoRestTemplate.exchange(
                     getMonitoramentoUrl("/api/monitoramento/ultimos"),
                     HttpMethod.GET, null,
                     new ParameterizedTypeReference<>() {});
+
             if (resp.getBody() != null) {
                 todos.addAll(resp.getBody());
-                log.info("Recuperados {} registros do Monitoramento.", resp.getBody().size());
+                log.info("✅ Recuperados {} registros do Monitoramento legado.", resp.getBody().size());
             }
-        } catch (HttpServerErrorException e) {
-            log.debug("Endpoint /api/monitoramento/ultimos indisponível ({}): ignorando.",
-                    e.getStatusCode());
+        } catch (HttpServerErrorException | HttpClientErrorException e) {
+            // Tratamento para erros de API (5xx ou 4xx)
+            log.warn("⚠️ Endpoint do Monitoramento indisponível (Status: {}): ignorando.", e.getStatusCode());
         } catch (Exception e) {
-            log.debug("Falha ao buscar histórico no Monitoramento: {}", e.getMessage());
+            // Tratamento para erros de rede (SocketException, Connection Refused)
+            log.error("❌ Falha de rede ao tentar conectar no Monitoramento: {}", e.getMessage());
+            log.debug("Verifique a URL configurada no application.properties/yaml. Não use host.docker.internal.");
         }
 
-        // 2. Busca Individualizada (Padrão Quarkus/Novos Serviços)
-        List<String> novosServicos = List.of("rondon", "monitorasp", "entrevias");
+        // 2. Busca Individualizada (Padrão Quarkus/Novos Serviços com Service Discovery/Eureka)
+        // 🔹 INCLUSÃO: O novo microsserviço da SPVias foi adicionado à lista
+        List<String> novosServicos = List.of("rondon", "monitorasp", "entrevias", "spvias");
 
         for (String servico : novosServicos) {
             String baseUrl = serviceUrlMap.get(servico);
-            if (baseUrl != null) {
+            if (baseUrl != null && !baseUrl.isBlank()) {
                 try {
+                    // Usando o loadBalancedRestTemplate que já resolve o nome do Eureka
                     ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
                             "http://" + baseUrl + "/radares/ultimos?limite=10", RadarDTO[].class);
+
                     if (resp.getBody() != null) {
                         todos.addAll(Arrays.asList(resp.getBody()));
                         log.info("✅ Recuperados {} registros da {}.", resp.getBody().length, servico.toUpperCase());
                     }
                 } catch (Exception e) {
-                    log.warn("❌ Falha ao buscar últimos da {}: {}", servico.toUpperCase(), e.getMessage());
+                    log.warn("❌ Falha de comunicação com {}: {}", servico.toUpperCase(), e.getMessage());
                 }
+            } else {
+                log.warn("⚠️ Serviço [{}] não possui URL mapeada em 'serviceUrlMap'.", servico.toUpperCase());
             }
         }
 
-        return todos.stream()
-                .filter(Objects::nonNull)
-                .sorted(comparatorDataHoraDesc())
-                .limit(10)
-                .collect(Collectors.toList());
+        return todos;
     }
 
     // ─── Método Utilitário de Deduplicação ──────────────────────────────────────
@@ -761,6 +766,43 @@ public class RadarsBFFService {
         });
     }
 
+    /**
+     * Agregador exclusivo para a Busca por Placa.
+     * Faz a junção, remoção de duplicados, ordenação global e paginação rigorosa em memória.
+     */
+    private RadarPageDTO aggregateBuscaPlaca(List<RadarPageDTO> pages, Pageable pageable) {
+        // 1. Junta tudo o que os microsserviços devolveram (Até 5000 registos em memória)
+        List<RadarDTO> combined = pages.stream()
+                .filter(p -> p != null && p.getContent() != null)
+                .flatMap(p -> p.getContent().stream())
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        // 2. Remove duplicados ANTES de fatiar a página
+        List<RadarDTO> deduplicados = removerDuplicados(combined);
+
+        // 3. Ordenação Global Absoluta de todos os resultados
+        deduplicados.sort(comparatorDataHoraDesc());
+
+        // 4. Paginação Real em Memória para o DataGrid
+        int totalElements = deduplicados.size();
+        int pageSize = pageable.getPageSize();
+        int pageNumber = pageable.getPageNumber();
+        int totalPages = pageSize > 0 ? (int) Math.ceil((double) totalElements / pageSize) : 0;
+
+        int fromIndex = pageNumber * pageSize;
+        int toIndex = Math.min(fromIndex + pageSize, totalElements);
+
+        List<RadarDTO> paged = (fromIndex >= totalElements)
+                ? Collections.emptyList()
+                : deduplicados.subList(fromIndex, toIndex);
+
+        log.info("📄 [BFF] Paginação em Memória da Placa: {} registos totais globais, a devolver a página {}/{} com {} itens",
+                totalElements, pageNumber, totalPages, paged.size());
+
+        return new RadarPageDTO(paged, new PageMetadata(pageNumber, pageSize, totalElements, totalPages));
+    }
+
     // ==================================================================================
     // HELPERS PRIVADOS
     // ==================================================================================
@@ -844,8 +886,13 @@ public class RadarsBFFService {
                 .map(f -> {
                     try {
                         return f.get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    } catch (TimeoutException e) {
+                        // 🚨 AGORA O ERRO VAI GRITAR NO TERMINAL!
+                        log.error("⏱️ [BFF] TIMEOUT ESTOUROU: Um dos microsserviços demorou mais de {} segundos para responder e foi cortado!", REQUEST_TIMEOUT_SECONDS);
+                        return null;
                     } catch (Exception e) {
-                        return null; // O aggregateGlobalPages filtra nulos
+                        log.error("❌ [BFF] Erro ao aguardar resposta do microsserviço: {}", e.getMessage());
+                        return null;
                     }
                 })
                 .filter(Objects::nonNull)

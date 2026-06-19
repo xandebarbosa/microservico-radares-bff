@@ -226,6 +226,28 @@ public class MonitoramentoBFFService {
         );
     }
 
+    public void deletarUsuarioTelegram(String telegramId) {
+        String url = getUrl("/api/usuarios-telegram/" + telegramId);
+        log.info("BFF deletando usuário do telegram: {} ", url);
+
+        // Ajustado para manter o mesmo grupo de fallback do Telegram
+        CircuitBreaker circuitBreaker = circuitBreakerFactory.create("monitoramentoTelegramService");
+        circuitBreaker.run(
+                () -> {
+                    currentRestTemplate.delete(url);
+                    return null;
+                },
+                throwable -> {
+                    // Aqui você pode criar um handleException especifico para o Telegram depois, se quiser customizar o log.
+                    // Por enquanto, usar o atual funciona perfeitamente, pois ele repassa a exceção HTTP (404, 400, etc) para frente.
+                    handleException("deletar usuário do telegram", throwable);
+                    return null;
+                }
+        );
+
+
+    }
+
     private PlacaMonitoradaDTO handleException(String action, Throwable throwable) {
         log.error("❌ Erro ao {} monitorado: {}", action, throwable.getMessage());
 
@@ -241,4 +263,6 @@ public class MonitoramentoBFFService {
         // Se for outro erro (timeout, conexão recusada), lança erro genérico
         throw new RuntimeException("Falha ao " + action + ": " + throwable.getMessage(), throwable);
     }
+
+
 }

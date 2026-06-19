@@ -6,9 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
@@ -39,5 +37,21 @@ public class UsuarioTelegramBFFController {
         log.info("Requisição de sincronização de usuários do Telegram recebida pelo BFF.");
         List<UsuarioTelegramDTO> usuariosAtualizados = monitoramentoBFFService.sincronizarUsuariosTelegram();
         return ResponseEntity.ok(usuariosAtualizados);
+    }
+
+    /**
+     * Endpoint para o Frontend deletar um Usuário do Telegram").
+     * Rota final: DELETE /usuarios-telegram/id
+     */
+    @DeleteMapping("/{id}")
+    @PreAuthorize("hasAnyRole('ADMIN')")
+    public ResponseEntity<Void> deletarUsuario(@PathVariable String id) {
+        try {
+            //Chama o service do BFF que vai fazer a requisição HTTP para o serviço na porta 8089
+            monitoramentoBFFService.deletarUsuarioTelegram(id);
+            return ResponseEntity.noContent().build();
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
     }
 }
