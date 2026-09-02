@@ -8,6 +8,7 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
 import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
+import org.springframework.web.socket.config.annotation.WebSocketTransportRegistration;
 
 @Configuration
 @EnableWebSocketMessageBroker // Habilita o broker de mensagens WebSocket
@@ -44,5 +45,21 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     public void configureClientInboundChannel(ChannelRegistration registration) {
         // ✅ Autenticação acontece AQUI no STOMP CONNECT
         registration.interceptors(webSocketAuthInterceptor);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // ✅ NOVO: Configuração de Transporte para suportar alta volumetria
+    // ─────────────────────────────────────────────────────────────
+    @Override
+    public void configureWebSocketTransport(WebSocketTransportRegistration registration) {
+        // Aumenta o tempo limite de envio para 20 segundos (padrão: 10s)
+        registration.setSendTimeLimit(20000);
+
+        // Aumenta o buffer limite da sessão para 2MB (padrão: 512KB)
+        // Evita a queda da conexão (código 4500) em rajadas de mensagens
+        registration.setSendBufferSizeLimit(2 * 1024 * 1024);
+
+        // Aumenta o tamanho máximo de uma única mensagem recebida/enviada para 128KB (padrão: 64KB)
+        registration.setMessageSizeLimit(128 * 1024);
     }
 }

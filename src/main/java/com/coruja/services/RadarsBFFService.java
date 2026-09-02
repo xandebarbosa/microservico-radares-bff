@@ -71,6 +71,9 @@ public class RadarsBFFService {
     private volatile String ultimoIdRondonEnviado    = "";
     private volatile String ultimoIdMonitoraSPEnviado = "";
     private volatile String ultimoIdEntreviasEnviado = "";
+    //private volatile String ultimoIdSPViasEnviado = "";
+    private volatile String ultimoIdCartEnviado = "";
+    private volatile String ultimoIdPantanalEnviado = "";
 
     @Value("${microservico.monitoramento.url:http://MICROSERVICO-MONITORAMENTO}")
     private String monitoramentoUrl;
@@ -110,7 +113,8 @@ public class RadarsBFFService {
         serviceUrlMap.put("entrevias",  "MICROSERVICO-RADARES-ENTREVIAS");
         serviceUrlMap.put("rondon",     "MICROSERVICO-RADARES-RONDON");
         serviceUrlMap.put("monitorasp", "MICROSERVICO-RADARES-MONITORASP");
-        serviceUrlMap.put("spvias", "MICROSERVICO-RADARES-SPVIAS");
+        //serviceUrlMap.put("spvias",     "MICROSERVICO-RADARES-SPVIAS");
+        serviceUrlMap.put("pantanal",    "MICROSERVICO-RADARES-PANTANAL");
 
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
@@ -144,7 +148,15 @@ public class RadarsBFFService {
         // Passo 2: Dispara as buscas nos microsserviços de radares
         List<CompletableFuture<RadarPageDTO>> futures = urls.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
-                        () -> fetchPlacaFromMicroservice(baseUrl, placa, pageable), executorService))
+                        () -> fetchPlacaFromMicroservice(baseUrl, placa, pageable), executorService)
+                        // ⏱️ O SEGREDO ESTÁ AQUI: Limite máximo de 5 segundos para a concessionária responder
+                        .orTimeout(10, TimeUnit.SECONDS)
+                        // 🛡️ SE FALHAR (Timeout, 500, Container Caiu): Pega o erro, loga e devolve uma página vazia
+                        .exceptionally(ex -> {
+                            log.warn("⚠️ [BFF] Fallback ativado para {}. Motivo: {}", baseUrl, ex.getMessage());
+                            return new RadarPageDTO();
+                        })
+                )
                 .toList();
 
         // Aguarda os radares respeitando o timeout
@@ -251,7 +263,14 @@ public class RadarsBFFService {
         List<CompletableFuture<RadarPageDTO>> futures = urls.stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(
                         () -> fetchLocalFromMicroservice(baseUrl, data, horaInicial, horaFinal, rodovia, praca, km, sentido, pageable),
-                        executorService))
+                        executorService)
+                        .orTimeout(10, TimeUnit.SECONDS)
+                        // 🛡️ SE FALHAR (Timeout, 500, Container Caiu): Pega o erro, loga e devolve uma página vazia
+                        .exceptionally(ex -> {
+                            log.warn("⚠️ [BFF] Fallback ativado para busca por local {}. Motivo: {}", baseUrl, ex.getMessage());
+                            return new RadarPageDTO(); // Retorna vazio para não quebrar a agregação das outras
+                        })
+                )
                 .toList();
 
         return aggregateGlobalPages(collectFutures(futures), pageable);
@@ -306,21 +325,36 @@ public class RadarsBFFService {
 
     @Cacheable(
             value  = "lista-rodovias-bff",
-            key    = "#concessionaria != null ? #concessionaria : 'all'",
+            key    = "#concessionaria != null ? #concessionaria.toLowerCase().trim() : 'all'",
             unless = "#result == null || #result.isEmpty()"
     )
     public List<RodoviaDTO> listarRodovias(String concessionaria) {
         //log.info("🔍 BFF: Solicitando lista de rodovias aos microserviços...");
 
-        if (concessionaria != null && !concessionaria.isEmpty()) {
-            String baseUrl = serviceUrlMap.get(concessionaria.toLowerCase());
+        if (concessionaria != null && !concessionaria.trim().isEmpty()) {
+            String concKey = concessionaria.trim().toLowerCase();
+            String baseUrl = serviceUrlMap.get(concKey);
+
             if (baseUrl != null) {
+                String url = "http://" + baseUrl + "/radares/rodovias";
+                log.debug("📡 [BFF] Buscando rodovias na URL: {}", url);
+
                 return executeCircuitBreakerListRequest(
-                        "listRodovias", baseUrl,
-                        "http://" + baseUrl + "/radares/rodovias",
-                        RodoviaDTO.class);
+                        "listRodovias",
+                        baseUrl,
+                        url,
+                        RodoviaDTO.class
+                );
+            } else {
+                log.warn("⚠️ [BFF] Concessionária '{}' não encontrada no serviceUrlMap.", concKey);
+                // 🔹 CORREÇÃO: Se o frontend pediu uma específica e não mapeamos, devolvemos vazio!
+                // Jamais devemos cair no fetchListFromAll neste cenário.
+                return Collections.emptyList();
             }
         }
+
+        // Se o parâmetro concessionaria veio nulo ou vazio, aí sim buscamos de todas.
+        log.debug("📡 [BFF] Buscando rodovias de TODAS as concessionárias...");
         return fetchListFromAll("rodovias", RodoviaDTO.class);
     }
 
@@ -552,6 +586,10 @@ public class RadarsBFFService {
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
+                    } catch (Exception e) {
+                        // Captura exceções do DetranService (como Placa Inválida ou Indisponibilidade)
+                        log.warn("⚠️ [Exportação] Falha ao enriquecer a placa {}: {}. Aplicando N/I.", placaUnica, e.getMessage());
+                        // Não adiciona nada no dadosDetranMap, o que forçará o loop abaixo a preencher com N/I
                     } finally {
                         // 🚦 A Thread terminou e libera a catraca para a próxima
                         detranRateLimiter.release();
@@ -649,7 +687,7 @@ public class RadarsBFFService {
 
         // 2. Busca Individualizada (Padrão Quarkus/Novos Serviços com Service Discovery/Eureka)
         // 🔹 INCLUSÃO: O novo microsserviço da SPVias foi adicionado à lista
-        List<String> novosServicos = List.of("rondon", "monitorasp", "entrevias", "spvias");
+        List<String> novosServicos = List.of("rondon", "monitorasp", "entrevias", "motiva");
 
         for (String servico : novosServicos) {
             String baseUrl = serviceUrlMap.get(servico);
@@ -1177,7 +1215,7 @@ public class RadarsBFFService {
 
     // ─── Schedulers ─────────────────────────────────────────────────────────────
 
-    @Scheduled(fixedDelay = 60000)
+    @Scheduled(fixedDelay = 15000)
     public void atualizarRondonNoPainel() {
         String baseUrl = serviceUrlMap.get("rondon");
         if (baseUrl == null) return;
@@ -1200,7 +1238,7 @@ public class RadarsBFFService {
         }
     }
 
-    @Scheduled(fixedDelay = 60000)
+    @Scheduled(fixedDelay = 15000)
     public void atualizarMonitoraSPNoPainel() {
         String baseUrl = serviceUrlMap.get("monitorasp");
         if (baseUrl == null) return;
@@ -1223,7 +1261,7 @@ public class RadarsBFFService {
         }
     }
 
-    @Scheduled(fixedDelay = 60000)
+    @Scheduled(fixedDelay = 15000)
     public void atualizarEntreviasNoPainel() {
         String baseUrl = serviceUrlMap.get("entrevias");
         if (baseUrl == null) return;
@@ -1246,6 +1284,83 @@ public class RadarsBFFService {
             }
         } catch (Exception e) {
             log.debug("⚠️ [Scheduler] Aguardando disponibilidade da Entrevias...");
+        }
+    }
+
+    /**
+     * //@Scheduled(fixedDelay = 15000)
+    public void atualizarSPViasNoPainel() {
+        String baseUrl = serviceUrlMap.get("spvias");
+        if (baseUrl == null) return;
+
+        try {
+            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
+            );
+            if (resp.getBody() != null && resp.getBody().length > 0) {
+                RadarDTO recente = resp.getBody()[0];
+                String id = String.valueOf(recente.getId());
+
+                if (!id.equals(ultimoIdSPViasEnviado)) {
+                    ultimoIdSPViasEnviado = id;
+                    log.info("🦉 [Scheduler] Nova passagem da SPVias (Placa: {} - Data: {} - Hora: {})",
+                            recente.getPlaca(), recente.getData(), recente.getHora());
+                    messagingTemplate.convertAndSend("/topic/last-radar", recente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da SPVias...");
+        }
+    }*/
+
+    @Scheduled(fixedDelay = 15000)
+    public void atualizarCartNoPainel() {
+        String baseUrl = serviceUrlMap.get("cart");
+        if (baseUrl == null) return;
+
+        try {
+            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
+            );
+
+            if (resp.getBody() != null && resp.getBody().length > 0) {
+                RadarDTO recente = resp.getBody()[0];
+                String id = String.valueOf(recente.getId());
+
+                if (!id.equals(ultimoIdCartEnviado)) {
+                    ultimoIdCartEnviado = id;
+                    log.info("🦉 [Scheduler] Nova passagem da Cart (Placa: {} - Data: {} - Hora: {})",
+                            recente.getPlaca(), recente.getData(), recente.getHora());
+                    messagingTemplate.convertAndSend("/topic/last-radar", recente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da Cart...");
+        }
+    }
+
+    @Scheduled(fixedDelay = 15000)
+    public void atualizarPantanalNoPainel() {
+        String baseUrl = serviceUrlMap.get("pantanal");
+        if (baseUrl == null) return;
+
+        try {
+            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
+            );
+            if (resp.getBody() != null && resp.getBody().length > 0) {
+                RadarDTO recente = resp.getBody()[0];
+                String id = String.valueOf(recente.getId());
+
+                if (!id.equals(ultimoIdPantanalEnviado)) {
+                    ultimoIdPantanalEnviado = id;
+                    log.info("🦉 [Scheduler] Nova passagem da Motiva (Placa: {} - Data: {} - Hora: {})",
+                            recente.getPlaca(), recente.getData(), recente.getHora());
+                    messagingTemplate.convertAndSend("/topic/last-radar", recente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da Motiva...");
         }
     }
 

@@ -1,5 +1,6 @@
 package com.coruja.services;
 
+import com.coruja.exceptions.DetranIndisponivelException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +20,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.LocalDateTime;
 
 @Service
@@ -40,6 +42,8 @@ public class DetranService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private final HttpClient httpClient;
+
     // Variáveis de controle de Cache do Token
     private String currentToken = null;
     private LocalDateTime tokenExpirationTime = null;
@@ -57,6 +61,10 @@ public class DetranService {
         factory.setReadTimeout(5000);    // 5 segundos máximo esperando payload do veículo
 
         this.restTemplate = new RestTemplate(factory);
+
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(3))
+                .build();
     }
 
     /**
@@ -86,8 +94,6 @@ public class DetranService {
                         "&client_secret=" + URLEncoder.encode(safeClientSecret, StandardCharsets.UTF_8) +
                         "&scope=" + URLEncoder.encode("api:detran.veiculos.search", StandardCharsets.UTF_8);
 
-                HttpClient client = HttpClient.newHttpClient();
-
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(authUrl))
                         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -95,7 +101,7 @@ public class DetranService {
                         .POST(HttpRequest.BodyPublishers.ofString(formBody))
                         .build();
 
-                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
                 if (response.statusCode() == 200) {
                     JsonNode jsonNode = objectMapper.readTree(response.body());
@@ -127,7 +133,7 @@ public class DetranService {
         if (bloqueioAtual != null) {
             if (LocalDateTime.now().isBefore(bloqueioAtual)) {
                 log.warn("🛑 Consulta ignorada para {}: Mainframe do Detran em período de bloqueio por instabilidade.", placa);
-                return null;
+                throw new DetranIndisponivelException("O serviço do Detran encontra-se instável e as consultas estão pausadas. Tente novamente em instantes.");
             } else {
                 this.mainframeBloqueadoAte = null;
             }
@@ -136,7 +142,7 @@ public class DetranService {
         String token = obterToken();
         if (token == null) {
             log.warn("❌ Falha na autenticação: Não foi possível obter o token do Detran para consultar a placa {}", placa);
-            return null;
+            throw new DetranIndisponivelException("Não foi possível autenticar com o provedor de dados estadual no momento.");
         }
 
         // 1ª Tentativa: Base do Estado de São Paulo (v3)
@@ -209,6 +215,7 @@ public class DetranService {
      * Centraliza o tratamento final das falhas após esgotar as duas bases de dados.
      */
     private JsonNode tratarErroFinalConsulta(String placa, Exception e) {
+        boolean isServerError = false;
         if (e instanceof HttpStatusCodeException) {
             HttpStatusCodeException httpError = (HttpStatusCodeException) e;
 
@@ -221,6 +228,7 @@ public class DetranService {
                 this.currentToken = null;
             }
 
+            isServerError = httpError.getStatusCode().is5xxServerError();
             log.error("❌ Detran retornou erro HTTP {} para a placa {}: {}", httpError.getStatusCode(), placa, httpError.getResponseBodyAsString());
         } else if (e instanceof ResourceAccessException) {
             log.error("🔌 Timeout ou falha física de rede ao conectar na API do Detran para a placa {}: {}", placa, e.getMessage());
@@ -228,13 +236,18 @@ public class DetranService {
             log.error("❌ Erro inesperado na API do Detran para a placa {}: {}", placa, e.getMessage());
         }
 
-        // Ativa o circuito de proteção se o governo de SP e o Nacional caírem juntos ou derem Timeout
         String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        if (msg.contains("500") || msg.contains("timeout") || msg.contains("connection") || e instanceof ResourceAccessException) {
+
+        // Ativa o circuito de proteção se o governo de SP e o Nacional caírem juntos ou derem Timeout
+        if (isServerError || e instanceof ResourceAccessException || msg.contains("timeout") || msg.contains("connection")) {
             log.warn("🚨 API do Detran instável ou indisponível. Suspendendo novas chamadas externas por 1 minuto.");
             this.mainframeBloqueadoAte = LocalDateTime.now().plusMinutes(1);
+
+            // Lança a exceção para quebrar o fluxo e devolver o 503 para o Frontend
+            throw new DetranIndisponivelException("O serviço do Detran encontra-se indisponível no momento. Tente novamente mais tarde.");
         }
 
-        return null;
+        // Para demais erros genéricos onde as bases falharam
+        throw new DetranIndisponivelException("Falha de comunicação com a base governamental. Não foi possível consultar os dados.");
     }
 }

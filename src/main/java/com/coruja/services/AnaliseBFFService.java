@@ -1,6 +1,7 @@
 package com.coruja.services;
 
 import com.coruja.dto.RadarDTO;
+import com.coruja.exceptions.DetranIndisponivelException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -19,6 +20,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 
 @Service
@@ -63,6 +65,9 @@ public class AnaliseBFFService {
             // Aplica o enriquecimento inteligente também na busca automática
             return enriquecerComDadosDoDetran(resultados);
 
+        } catch (DetranIndisponivelException e) {
+            log.warn("⚠️ [BFF] Análise abortada: {}", e.getMessage());
+            throw e;
         } catch (Exception e) {
             log.error("❌ [BFF] Erro ao comunicar com o serviço de Análise: {}", e.getMessage());
             throw new RuntimeException("Falha ao analisar comboio: " + e.getMessage());
@@ -91,13 +96,17 @@ public class AnaliseBFFService {
 
             return enriquecerComDadosDoDetran(resultados);
 
+        } catch (DetranIndisponivelException e) {
+            // O interceptador do Spring vai pegar essa exceção e retornar o HTTP 503 pro frontend
+            log.warn("⚠️ [BFF] Análise de passagens abortada: {}", e.getMessage());
+            throw e;
         } catch (Exception e) {
-            log.error("❌ [BFF] Erro ao comunicar com o serviço de Análise Inteligente: {}", e.getMessage());
+            log.error("❌ [BFF] Erro genérico ao comunicar com o serviço de Análise Inteligente: {}", e.getMessage());
             throw new RuntimeException("Falha ao analisar comboio avançado: " + e.getMessage());
         }
     }
 
-    /**https://gemini.google.com/app/09d6d4fb3484a428
+    /**
      * Recebe a lista de suspeitos da IA e injeta os dados do Detran de forma reativa e híbrida
      */
     private JsonNode enriquecerComDadosDoDetran(JsonNode resultados) {
@@ -111,34 +120,49 @@ public class AnaliseBFFService {
 
                         if (placaSuspeita != null) {
                             futures.add(CompletableFuture.runAsync(() -> {
-                                JsonNode dadosDetran = detranService.consultarVeiculo(placaSuspeita);
-
-                                if (dadosDetran != null) {
-                                    // Extração blindada que suporta tanto o JSON v3 (SP) quanto o v1 (Nacional)
-                                    objNode.put("marcaModelo", extrairCampoHibrido(dadosDetran, "marca"));
-                                    objNode.put("cor", extrairCampoHibrido(dadosDetran, "cor"));
-                                    objNode.put("municipio", extrairCampoHibrido(dadosDetran, "municipio"));
-                                    objNode.put("uf", extrairCampoHibrido(dadosDetran, "uf"));
-                                    objNode.put("anoModelo", extrairCampoHibrido(dadosDetran, "anoModelo"));
-
-                                    // Adicionando proprietário para análises mais profundas de frota
-                                    objNode.put("nomeProprietario", extrairCampoHibrido(dadosDetran, "proprietario", "nome"));
-                                } else {
-                                    objNode.put("marcaModelo", "N/I");
-                                    objNode.put("cor", "N/I");
-                                    objNode.put("municipio", "N/I");
-                                    objNode.put("uf", "N/I");
-                                    objNode.put("anoModelo", "N/I");
-                                    objNode.put("nomeProprietario", "N/I");
+                                try {
+                                    JsonNode dadosDetran = detranService.consultarVeiculo(placaSuspeita);
+                                    if (dadosDetran != null) {
+                                        objNode.put("marcaModelo", extrairCampoHibrido(dadosDetran, "marca"));
+                                        objNode.put("cor", extrairCampoHibrido(dadosDetran, "cor"));
+                                        objNode.put("municipio", extrairCampoHibrido(dadosDetran, "municipio"));
+                                        objNode.put("uf", extrairCampoHibrido(dadosDetran, "uf"));
+                                        objNode.put("anoModelo", extrairCampoHibrido(dadosDetran, "anoModelo"));
+                                        objNode.put("nomeProprietario", extrairCampoHibrido(dadosDetran, "proprietario", "nome"));
+                                    } else {
+                                        preencherComNaoInformado(objNode);
+                                    }
+                                } catch (DetranIndisponivelException e) {
+                                    // Se o DetranService lançar a exceção, capturamos aqui dentro da thread
+                                    // Preenchemos com "N/I" para não perder os dados vitais do radar (Quarkus)
+                                    preencherComNaoInformado(objNode);
                                 }
                             }, executor));
                         }
                     }
                 }
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+                // Agora o .join() não vai mais estourar por causa do Detran,
+                // pois tratamos a exceção dentro da tarefa assíncrona.
+                try {
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                } catch (CompletionException e) {
+                    log.error("Erro inesperado durante processamento paralelo das placas: {}", e.getMessage());
+                    // Se for um erro crítico de infraestrutura (falta de memória, etc), lançamos.
+                    throw e;
+                }
             }
         }
         return resultados;
+    }
+
+    private void preencherComNaoInformado(ObjectNode objNode) {
+        objNode.put("marcaModelo", "N/I");
+        objNode.put("cor", "N/I");
+        objNode.put("municipio", "N/I");
+        objNode.put("uf", "N/I");
+        objNode.put("anoModelo", "N/I");
+        objNode.put("nomeProprietario", "N/I");
     }
 
     /**

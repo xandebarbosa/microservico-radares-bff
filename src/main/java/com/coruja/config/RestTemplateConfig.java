@@ -7,6 +7,7 @@ import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
@@ -70,5 +71,19 @@ public class RestTemplateConfig {
                 // Damos 120 segundos (2 minutos) de paciência para o Quarkus cruzar os dados
                 .setReadTimeout(Duration.ofSeconds(120))
                 .build();
+    }
+
+    @Bean("radarsRestTemplate")
+    public RestTemplate radarsRestTemplate() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+
+        // Tempo máximo para estabelecer a conexão (2 segundos)
+        factory.setConnectTimeout(2000);
+
+        // Tempo máximo esperando a resposta da concessionária (5 segundos)
+        // Se passar disso, o RestTemplate lança uma exceção e aborta.
+        factory.setReadTimeout(5000);
+
+        return new RestTemplate(factory);
     }
 }
