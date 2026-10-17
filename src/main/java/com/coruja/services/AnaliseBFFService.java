@@ -125,10 +125,10 @@ public class AnaliseBFFService {
                                     if (dadosDetran != null) {
                                         objNode.put("marcaModelo", extrairCampoHibrido(dadosDetran, "marca"));
                                         objNode.put("cor", extrairCampoHibrido(dadosDetran, "cor"));
-                                        objNode.put("municipio", extrairCampoHibrido(dadosDetran, "municipio"));
+                                        objNode.put("municipio", extrairCampoHibrido(dadosDetran, "municipio", "nome"));
                                         objNode.put("uf", extrairCampoHibrido(dadosDetran, "uf"));
                                         objNode.put("anoModelo", extrairCampoHibrido(dadosDetran, "anoModelo"));
-                                        objNode.put("nomeProprietario", extrairCampoHibrido(dadosDetran, "proprietario", "nome"));
+                                        objNode.put("nomeProprietario", extrairNomeProprietario(dadosDetran));
                                     } else {
                                         preencherComNaoInformado(objNode);
                                     }
@@ -154,6 +154,17 @@ public class AnaliseBFFService {
             }
         }
         return resultados;
+    }
+
+    private String extrairNomeProprietario(JsonNode node) {
+        if (node == null || !node.hasNonNull("proprietario")) return "N/I";
+        JsonNode prop = node.get("proprietario");
+        if (prop.isObject() && prop.hasNonNull("nome")) {
+            return prop.get("nome").asText();
+        } else if (prop.isTextual()) {
+            return prop.asText();
+        }
+        return "N/I";
     }
 
     private void preencherComNaoInformado(ObjectNode objNode) {

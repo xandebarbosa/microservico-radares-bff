@@ -34,11 +34,13 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     public void registerStompEndpoints(StompEndpointRegistry registry) {
          //✅ SIMPLIFICADO: Sem HandshakeHandler nem Interceptor
         // A autenticação acontece APENAS no STOMP CONNECT via WebSocketAuthInterceptor
+        System.out.println(">>> REGISTRANDO ENDPOINT /ws PURO (SEM SOCKJS)");
         registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("*") // Permite todas as origens (ajuste em produção)
-                .withSockJS()
-                .setHeartbeatTime(25000)      // Heartbeat a cada 25s
-                .setDisconnectDelay(5000);    // Tempo antes de considerar desconectado
+                .setAllowedOriginPatterns("*");// Permite todas as origens (ajuste em produção)
+
+                //.setHeartbeatTime(25000)      // Heartbeat a cada 25s
+                //.setDisconnectDelay(5000);    // Tempo antes de considerar desconectado
+
     }
 
     @Override

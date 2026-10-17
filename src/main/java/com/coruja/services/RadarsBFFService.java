@@ -31,8 +31,11 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
+import java.time.Duration;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
@@ -71,12 +74,16 @@ public class RadarsBFFService {
     private volatile String ultimoIdRondonEnviado    = "";
     private volatile String ultimoIdMonitoraSPEnviado = "";
     private volatile String ultimoIdEntreviasEnviado = "";
-    //private volatile String ultimoIdSPViasEnviado = "";
     private volatile String ultimoIdCartEnviado = "";
     private volatile String ultimoIdPantanalEnviado = "";
+    private volatile String ultimoIdAppiaEnviado = "";
+    private volatile String ultimoIdEixoEnviado = "";
 
     @Value("${microservico.monitoramento.url:http://MICROSERVICO-MONITORAMENTO}")
     private String monitoramentoUrl;
+
+    @Value("${radares.limite-atraso-minutos:15}")
+    private long limiteAtrasoMinutos = 15;
 
     private final Semaphore detranRateLimiter = new Semaphore(15);
     // ─── Construtor ─────────────────────────────────────────────────────────────
@@ -113,8 +120,8 @@ public class RadarsBFFService {
         serviceUrlMap.put("entrevias",  "MICROSERVICO-RADARES-ENTREVIAS");
         serviceUrlMap.put("rondon",     "MICROSERVICO-RADARES-RONDON");
         serviceUrlMap.put("monitorasp", "MICROSERVICO-RADARES-MONITORASP");
-        //serviceUrlMap.put("spvias",     "MICROSERVICO-RADARES-SPVIAS");
-        serviceUrlMap.put("pantanal",    "MICROSERVICO-RADARES-PANTANAL");
+        serviceUrlMap.put("motiva",     "MICROSERVICO-RADARES-PANTANAL");
+        serviceUrlMap.put("appia",      "MICROSERVICO-RADARES-APPIA");
 
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
     }
@@ -169,39 +176,11 @@ public class RadarsBFFService {
                 // Aguarda o Detran por no máximo 4 segundos para não atrasar a resposta da tela
                 dadosDetran = futuroDetran.get(4, TimeUnit.SECONDS);
             } catch (Exception e) {
-                log.warn("⚠️ [BFF] Detran demorou muito para responder, aplicando valores padrão N/I.");
-            }
-
-            String marcaModelo = "N/I", cor = "N/I", municipio = "N/I", uf = "N/I",
-                    anoModelo = "N/I", nomeProprietario = "N/I", cpfProprietario = "N/I";
-
-            if (dadosDetran != null) {
-                marcaModelo = extrairCampoHibrido(dadosDetran, "marca", "descricao");
-                cor = extrairCampoHibrido(dadosDetran, "cor", "descricao");
-                municipio = extrairCampoHibrido(dadosDetran, "municipio", "nome");
-                uf = dadosDetran.hasNonNull("uf") ? dadosDetran.get("uf").asText() : "N/I";
-                anoModelo = dadosDetran.hasNonNull("anoModelo") ? dadosDetran.get("anoModelo").asText() : "N/I";
-
-                if (dadosDetran.hasNonNull("proprietario")) {
-                    JsonNode propNode = dadosDetran.get("proprietario");
-                    if (propNode.isObject()) {
-                        nomeProprietario = propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I";
-                        cpfProprietario = propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I";
-                    } else if (propNode.isTextual()) {
-                        nomeProprietario = propNode.asText();
-                        cpfProprietario = dadosDetran.hasNonNull("proprietarioNumeroDocumento") ? dadosDetran.get("proprietarioNumeroDocumento").asText() : "N/I";
-                    }
-                }
+                log.warn("⚠️ [BFF] Detran demorou muito para responder ou falhou, aplicando valores padrão.");
             }
 
             for (RadarDTO radar : pagina.getContent()) {
-                radar.setMarcaModelo(marcaModelo);
-                radar.setCor(cor);
-                radar.setMunicipio(municipio);
-                radar.setUf(uf);
-                radar.setAnoModelo(anoModelo);
-                radar.setNomeProprietario(nomeProprietario);
-                radar.setCpfProprietario(cpfProprietario);
+                enriquecerRadarComDetran(radar, dadosDetran);
             }
         }
 
@@ -422,7 +401,7 @@ public class RadarsBFFService {
         return aggregateGlobalPages(collectFutures(futures), pageable);
     }
 
-    //@Cacheable(value = "locais-radares-bff", unless = "#result == null || #result.isEmpty()")
+    @Cacheable(value = "locais-radares-bff", unless = "#result == null || #result.isEmpty()")
     public List<RadarLocationDTO> getAllRadarLocations() {
         log.info("📍 [BFF-MAPA] O FrontEnd pediu o mapa! Se este log apareceu, o CACHE ESTÁ DESLIGADO!");
         List<String> urls = new ArrayList<>(serviceUrlMap.values());
@@ -603,113 +582,191 @@ public class RadarsBFFService {
         // 5. Costura os dados retornados na lista original (Super rápido, tudo em memória)
         for (RadarDTO radar : listaRadares) {
             JsonNode dados = dadosDetranMap.get(radar.getPlaca());
-            if (dados != null) {
-                radar.setMarcaModelo(extrairCampoHibrido(dados, "marca", "descricao"));
-                radar.setCor(extrairCampoHibrido(dados, "cor", "descricao"));
-                radar.setMunicipio(extrairCampoHibrido(dados, "municipio", "nome"));
-                radar.setUf(dados.hasNonNull("uf") ? dados.get("uf").asText() : "N/I");
-                radar.setAnoModelo(dados.hasNonNull("anoModelo") ? dados.get("anoModelo").asText() : "N/I");
-
-                if (dados.hasNonNull("proprietario")) {
-                    JsonNode propNode = dados.get("proprietario");
-                    if (propNode.isObject()) {
-                        radar.setNomeProprietario(propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I");
-                        radar.setCpfProprietario(propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I");
-                    } else if (propNode.isTextual()) {
-                        radar.setNomeProprietario(propNode.asText());
-                        radar.setCpfProprietario(dados.hasNonNull("proprietarioNumeroDocumento") ? dados.get("proprietarioNumeroDocumento").asText() : "N/I");
-                    }
-                } else {
-                    radar.setNomeProprietario("N/I");
-                    radar.setCpfProprietario("N/I");
-                }
-            } else {
-                radar.setMarcaModelo("N/I");
-                radar.setCor("N/I");
-                radar.setMunicipio("N/I");
-                radar.setUf("N/I");
-                radar.setAnoModelo("N/I");
-                radar.setNomeProprietario("Não Encontrado");
-                radar.setCpfProprietario("Não Encontrado");
-            }
+            enriquecerRadarComDetran(radar, dados);
         }
 
         return listaRadares;
     }
 
     // ==================================================================================
-    // 6. ÚLTIMOS PROCESSADOS
+    // 6. ÚLTIMOS PROCESSADOS (COM DETECÇÃO DE ATRASO)
     // ==================================================================================
 
     public List<RadarDTO> getUltimosRadaresProcessados() {
-        List<RadarDTO> ultimos = new ArrayList<>(realtimeUpdateService.getLatestRadars().values());
-        List<RadarDTO> doBanco = fetchUltimosFromDatabase();
-        ultimos.addAll(doBanco);
+        log.info("📡 [BFF] Buscando últimos radares de todas as concessionárias...");
 
-        if (ultimos.isEmpty()) {
-            log.info("Cache de memória vazio. Nenhum registro encontrado.");
+        // 1. Coleta os radares mais recentes em memória (RabbitMQ / Schedulers)
+        Map<String, RadarDTO> mapaPorConcessionaria = new ConcurrentHashMap<>();
+
+        realtimeUpdateService.getLatestRadars().forEach((concessionaria, radar) -> {
+            if (radar != null && concessionaria != null && !concessionaria.isBlank()) {
+                mapaPorConcessionaria.put(concessionaria.trim().toUpperCase(), radar);
+            }
+        });
+
+        // 2. Busca do banco e dos microsserviços em paralelo com Virtual Threads
+        List<RadarDTO> doBanco = fetchUltimosFromDatabaseParalelo();
+        for (RadarDTO radar : doBanco) {
+            if (radar != null && radar.getConcessionaria() != null && !radar.getConcessionaria().isBlank()) {
+                String concKey = radar.getConcessionaria().trim().toUpperCase();
+                mapaPorConcessionaria.merge(concKey, radar, (existente, novo) -> {
+                    LocalDateTime dtExistente = extrairLocalDateTime(existente);
+                    LocalDateTime dtNovo = extrairLocalDateTime(novo);
+                    if (dtExistente == null) return novo;
+                    if (dtNovo == null) return existente;
+                    return dtNovo.isAfter(dtExistente) ? novo : existente;
+                });
+            }
         }
 
-        return ultimos.stream()
-                .filter(Objects::nonNull)
-                .sorted(Comparator
-                        .comparing(RadarDTO::getData,
-                                Comparator.nullsLast(Comparator.reverseOrder()))
-                        .thenComparing(RadarDTO::getHora,
-                                Comparator.nullsLast(Comparator.reverseOrder())))
-                .limit(10)
-                .collect(Collectors.toList());
+        // 3. Garante que TODAS as concessionárias configuradas estejam representadas no Dashboard
+        Set<String> concessionariasEsperadas = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        concessionariasEsperadas.addAll(List.of("CART", "EIXO", "ENTREVIAS", "RONDON", "MONITORASP", "PANTANAL", "APPIA"));
+        for (String k : serviceUrlMap.keySet()) {
+            if (!k.equalsIgnoreCase("motiva")) {
+                concessionariasEsperadas.add(k.toUpperCase());
+            }
+        }
+
+        for (String concKey : concessionariasEsperadas) {
+            mapaPorConcessionaria.computeIfAbsent(concKey, key -> {
+                RadarDTO placeholder = new RadarDTO();
+                placeholder.setConcessionaria(formatarNomeConcessionaria(key));
+                placeholder.setPlaca("---");
+                placeholder.setRodovia("N/A");
+                placeholder.setKm("N/A");
+                placeholder.setPraca("N/A");
+                placeholder.setSentido("N/A");
+                placeholder.setAtrasado(true);
+                placeholder.setStatusOperacional("SEM_COMUNICACAO");
+                placeholder.setTempoAtrasoFormatado("Sem comunicação");
+                return placeholder;
+            });
+        }
+
+        // 4. Calcula o atraso e status operacional de cada radar
+        List<RadarDTO> resultado = new ArrayList<>(mapaPorConcessionaria.values());
+        for (RadarDTO radar : resultado) {
+            if (!"SEM_COMUNICACAO".equals(radar.getStatusOperacional())) {
+                radar.calcularAtraso(limiteAtrasoMinutos);
+                if (radar.getConcessionaria() != null) {
+                    realtimeUpdateService.getLatestRadars().put(radar.getConcessionaria().trim().toUpperCase(), radar);
+                }
+            }
+        }
+
+        // 5. Ordena: Concessionárias atrasadas primeiro (para destacar alertas), depois por nome
+        resultado.sort(Comparator
+                .comparing(RadarDTO::getAtrasado, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(RadarDTO::getConcessionaria, String.CASE_INSENSITIVE_ORDER));
+
+        long totalAtrasados = resultado.stream().filter(r -> Boolean.TRUE.equals(r.getAtrasado())).count();
+        long totalAtuais = resultado.size() - totalAtrasados;
+        log.info("✅ [BFF] Painel de últimos radares: {} concessionárias ({} atuais, {} atrasadas, limite tolerância: {} min).",
+                resultado.size(), totalAtuais, totalAtrasados, limiteAtrasoMinutos);
+
+        return resultado;
     }
 
     private List<RadarDTO> fetchUltimosFromDatabase() {
-        List<RadarDTO> todos = new ArrayList<>();
+        return fetchUltimosFromDatabaseParalelo();
+    }
 
-        // 1. Monitoramento legado (Cart, Eixo)
+    private List<RadarDTO> fetchUltimosFromDatabaseParalelo() {
+        List<CompletableFuture<List<RadarDTO>>> futures = new ArrayList<>();
+
+        // Consulta paralela direta do último registro de cada microsserviço
+        Set<String> servicos = new LinkedHashSet<>(List.of("cart", "eixo", "entrevias", "rondon", "monitorasp", "motiva", "appia"));
+
+        for (String servico : servicos) {
+            futures.add(CompletableFuture.supplyAsync(() -> fetchUltimosPorServico(servico), executorService)
+                    .completeOnTimeout(Collections.emptyList(), 4, TimeUnit.SECONDS)
+                    .exceptionally(ex -> {
+                        log.warn("⚠️ [BFF] Falha ao consultar últimos de {}: {}", servico, ex.getMessage());
+                        return Collections.emptyList();
+                    }));
+        }
+
+        return futures.stream()
+                .map(CompletableFuture::join)
+                .flatMap(List::stream)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    private List<RadarDTO> fetchUltimosMonitoramentoLegado() {
+        String endpoint = getMonitoramentoUrl("/api/monitoramento/ultimos");
         try {
-            // A URL montada aqui deve apontar para o nome do container (ex: http://monitoramento:8089)
             ResponseEntity<List<RadarDTO>> resp = monitoramentoRestTemplate.exchange(
-                    getMonitoramentoUrl("/api/monitoramento/ultimos"),
-                    HttpMethod.GET, null,
+                    endpoint,
+                    HttpMethod.GET,
+                    null,
                     new ParameterizedTypeReference<>() {});
 
-            if (resp.getBody() != null) {
-                todos.addAll(resp.getBody());
-                log.info("✅ Recuperados {} registros do Monitoramento legado.", resp.getBody().size());
+            List<RadarDTO> registros = Optional.ofNullable(resp.getBody()).orElse(Collections.emptyList());
+            if (!registros.isEmpty()) {
+                log.info("✅ Recuperados {} registros do Monitoramento legado.", registros.size());
             }
+            return registros;
         } catch (HttpServerErrorException | HttpClientErrorException e) {
-            // Tratamento para erros de API (5xx ou 4xx)
             log.warn("⚠️ Endpoint do Monitoramento indisponível (Status: {}): ignorando.", e.getStatusCode());
         } catch (Exception e) {
-            // Tratamento para erros de rede (SocketException, Connection Refused)
             log.error("❌ Falha de rede ao tentar conectar no Monitoramento: {}", e.getMessage());
             log.debug("Verifique a URL configurada no application.properties/yaml. Não use host.docker.internal.");
         }
+        return Collections.emptyList();
+    }
 
-        // 2. Busca Individualizada (Padrão Quarkus/Novos Serviços com Service Discovery/Eureka)
-        // 🔹 INCLUSÃO: O novo microsserviço da SPVias foi adicionado à lista
-        List<String> novosServicos = List.of("rondon", "monitorasp", "entrevias", "motiva");
-
-        for (String servico : novosServicos) {
-            String baseUrl = serviceUrlMap.get(servico);
-            if (baseUrl != null && !baseUrl.isBlank()) {
-                try {
-                    // Usando o loadBalancedRestTemplate que já resolve o nome do Eureka
-                    ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
-                            "http://" + baseUrl + "/radares/ultimos?limite=10", RadarDTO[].class);
-
-                    if (resp.getBody() != null) {
-                        todos.addAll(Arrays.asList(resp.getBody()));
-                        log.info("✅ Recuperados {} registros da {}.", resp.getBody().length, servico.toUpperCase());
-                    }
-                } catch (Exception e) {
-                    log.warn("❌ Falha de comunicação com {}: {}", servico.toUpperCase(), e.getMessage());
-                }
-            } else {
-                log.warn("⚠️ Serviço [{}] não possui URL mapeada em 'serviceUrlMap'.", servico.toUpperCase());
-            }
+    private List<RadarDTO> fetchUltimosPorServico(String servico) {
+        String baseUrl = serviceUrlMap.get(servico.toLowerCase());
+        if (baseUrl == null || baseUrl.isBlank()) {
+            return Collections.emptyList();
         }
 
-        return todos;
+        String url = "http://" + baseUrl + "/radares/ultimos?limite=1";
+        try {
+            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(url, RadarDTO[].class);
+            RadarDTO[] body = resp.getBody();
+
+            if (body != null && body.length > 0) {
+                log.info("✅ Recuperado último registro da {}.", servico.toUpperCase());
+                for (RadarDTO r : body) {
+                    if (r != null) {
+                        r.setConcessionaria(formatarNomeConcessionaria(servico));
+                    }
+                }
+                return Arrays.asList(body);
+            }
+        } catch (Exception e) {
+            log.warn("❌ Falha de comunicação com {}: {}", servico.toUpperCase(), e.getMessage());
+        }
+        return Collections.emptyList();
+    }
+
+    private LocalDateTime extrairLocalDateTime(RadarDTO radar) {
+        if (radar == null || radar.getData() == null || radar.getHora() == null) {
+            return null;
+        }
+        try {
+            return LocalDateTime.of(radar.getData(), radar.getHora());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String formatarNomeConcessionaria(String nome) {
+        if (nome == null || nome.isBlank()) return "Desconhecido";
+        String lower = nome.trim().toLowerCase();
+        return switch (lower) {
+            case "cart" -> "Cart";
+            case "eixo" -> "Eixo";
+            case "entrevias" -> "Entrevias";
+            case "rondon" -> "Rondon";
+            case "monitorasp" -> "MonitoraSP";
+            case "motiva" -> "Motiva";
+            case "appia" -> "Appia";
+            default -> Character.toUpperCase(lower.charAt(0)) + (lower.length() > 1 ? lower.substring(1) : "");
+        };
     }
 
     // ─── Método Utilitário de Deduplicação ──────────────────────────────────────
@@ -1215,6 +1272,19 @@ public class RadarsBFFService {
 
     // ─── Schedulers ─────────────────────────────────────────────────────────────
 
+    @Scheduled(fixedRate = 60000)
+    public void recalcularAtrasosPainel() {
+        realtimeUpdateService.getLatestRadars().forEach((conc, radar) -> {
+            if (radar != null && !"SEM_COMUNICACAO".equals(radar.getStatusOperacional())) {
+                boolean estavaAtrasado = Boolean.TRUE.equals(radar.getAtrasado());
+                radar.calcularAtraso(limiteAtrasoMinutos);
+                if (Boolean.TRUE.equals(radar.getAtrasado()) != estavaAtrasado) {
+                    messagingTemplate.convertAndSend("/topic/last-radar", radar);
+                }
+            }
+        });
+    }
+
     @Scheduled(fixedDelay = 15000)
     public void atualizarRondonNoPainel() {
         String baseUrl = serviceUrlMap.get("rondon");
@@ -1229,6 +1299,9 @@ public class RadarsBFFService {
                 String id = String.valueOf(recente.getId());
                 if (!id.equals(ultimoIdRondonEnviado)) {
                     ultimoIdRondonEnviado = id;
+                    recente.setConcessionaria("Rondon");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("RONDON", recente);
                     log.info("⏰ [Scheduler] Nova passagem da Rondon (Placa: {} - Data: {} - Hora: {})", recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
@@ -1252,6 +1325,9 @@ public class RadarsBFFService {
                 String id = String.valueOf(recente.getId());
                 if (!id.equals(ultimoIdMonitoraSPEnviado)) {
                     ultimoIdMonitoraSPEnviado = id;
+                    recente.setConcessionaria("MonitoraSP");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("MONITORASP", recente);
                     log.info("⏰ [Scheduler] Nova passagem do MonitoraSP (Placa: {} - Dia: {} - Hora: {})", recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
@@ -1277,6 +1353,9 @@ public class RadarsBFFService {
                 // Adicione este campo 'ultimoIdEntreviasEnviado' no topo da classe como volatile String
                 if (!id.equals(ultimoIdEntreviasEnviado)) {
                     ultimoIdEntreviasEnviado = id;
+                    recente.setConcessionaria("Entrevias");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("ENTREVIAS", recente);
                     log.info("⭐ [Scheduler] Nova passagem da Entrevias (Placa: {} - Data: {} - Hora: {})",
                             recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
@@ -1287,31 +1366,31 @@ public class RadarsBFFService {
         }
     }
 
-    /**
-     * //@Scheduled(fixedDelay = 15000)
-    public void atualizarSPViasNoPainel() {
-        String baseUrl = serviceUrlMap.get("spvias");
+    @Scheduled(fixedDelay = 15000)
+    public void atualizarAppiaNoPainel() {
+        String baseUrl = serviceUrlMap.get("appia");
         if (baseUrl == null) return;
 
         try {
             ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
-                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
-            );
+                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class);
+
             if (resp.getBody() != null && resp.getBody().length > 0) {
                 RadarDTO recente = resp.getBody()[0];
                 String id = String.valueOf(recente.getId());
-
-                if (!id.equals(ultimoIdSPViasEnviado)) {
-                    ultimoIdSPViasEnviado = id;
-                    log.info("🦉 [Scheduler] Nova passagem da SPVias (Placa: {} - Data: {} - Hora: {})",
-                            recente.getPlaca(), recente.getData(), recente.getHora());
+                if (!id.equals(ultimoIdAppiaEnviado)) {
+                    ultimoIdAppiaEnviado = id;
+                    recente.setConcessionaria("Appia");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("APPIA", recente);
+                    log.info("⏰ [Scheduler] Nova passagem do APPIA (Placa: {} - Dia: {} - Hora: {})", recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
             }
         } catch (Exception e) {
-            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da SPVias...");
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade do APPIA...");
         }
-    }*/
+    }
 
     @Scheduled(fixedDelay = 15000)
     public void atualizarCartNoPainel() {
@@ -1329,6 +1408,9 @@ public class RadarsBFFService {
 
                 if (!id.equals(ultimoIdCartEnviado)) {
                     ultimoIdCartEnviado = id;
+                    recente.setConcessionaria("Cart");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("CART", recente);
                     log.info("🦉 [Scheduler] Nova passagem da Cart (Placa: {} - Data: {} - Hora: {})",
                             recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
@@ -1340,8 +1422,36 @@ public class RadarsBFFService {
     }
 
     @Scheduled(fixedDelay = 15000)
+    public void atualizarEixoNoPainel() {
+        String baseUrl = serviceUrlMap.get("eixo");
+        if (baseUrl == null) return;
+
+        try {
+            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+                    "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
+            );
+            if (resp.getBody() != null && resp.getBody().length > 0) {
+                RadarDTO recente = resp.getBody()[0];
+                String id = String.valueOf(recente.getId());
+
+                if (!id.equals(ultimoIdEixoEnviado)) {
+                    ultimoIdEixoEnviado = id;
+                    recente.setConcessionaria("Eixo");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("EIXO", recente);
+                    log.info("🦉 [Scheduler] Nova passagem da Eixo (Placa: {} - Data: {} - Hora: {})",
+                            recente.getPlaca(), recente.getData(), recente.getHora());
+                    messagingTemplate.convertAndSend("/topic/last-radar", recente);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("⚠️ [Scheduler] Aguardando disponibilidade da Eixo...");
+        }
+    }
+
+    @Scheduled(fixedDelay = 15000)
     public void atualizarPantanalNoPainel() {
-        String baseUrl = serviceUrlMap.get("pantanal");
+        String baseUrl = serviceUrlMap.get("motiva");
         if (baseUrl == null) return;
 
         try {
@@ -1354,7 +1464,10 @@ public class RadarsBFFService {
 
                 if (!id.equals(ultimoIdPantanalEnviado)) {
                     ultimoIdPantanalEnviado = id;
-                    log.info("🦉 [Scheduler] Nova passagem da Motiva (Placa: {} - Data: {} - Hora: {})",
+                    recente.setConcessionaria("Pantanal");
+                    recente.calcularAtraso(limiteAtrasoMinutos);
+                    realtimeUpdateService.getLatestRadars().put("PANTANAL", recente);
+                    log.info("🦉 [Scheduler] Nova passagem da Pantanal (Placa: {} - Data: {} - Hora: {})",
                             recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
@@ -1477,48 +1590,77 @@ public class RadarsBFFService {
             // 3. Costura os dados híbridos de volta nos DTOs da página
             for (RadarDTO radar : pagina.getContent()) {
                 JsonNode dados = dadosDetranMap.get(radar.getPlaca());
-
-                if (dados != null) {
-                    radar.setMarcaModelo(extrairCampoHibrido(dados, "marca", "descricao"));
-                    radar.setCor(extrairCampoHibrido(dados, "cor", "descricao"));
-                    radar.setMunicipio(extrairCampoHibrido(dados, "municipio", "nome"));
-                    radar.setUf(dados.hasNonNull("uf") ? dados.get("uf").asText() : "N/I");
-                    radar.setAnoModelo(dados.hasNonNull("anoModelo") ? dados.get("anoModelo").asText() : "N/I");
-
-                    if (dados.hasNonNull("proprietario")) {
-                        JsonNode propNode = dados.get("proprietario");
-                        if (propNode.isObject()) {
-                            radar.setNomeProprietario(propNode.hasNonNull("nome") ? propNode.get("nome").asText() : "N/I");
-                            radar.setCpfProprietario(propNode.hasNonNull("numeroDocumento") ? propNode.get("numeroDocumento").asText() : "N/I");
-                        } else if (propNode.isTextual()) {
-                            radar.setNomeProprietario(propNode.asText());
-                            radar.setCpfProprietario(dados.hasNonNull("proprietarioNumeroDocumento") ? dados.get("proprietarioNumeroDocumento").asText() : "N/I");
-                        }
-                    } else {
-                        radar.setNomeProprietario("N/I");
-                        radar.setCpfProprietario("N/I");
-                    }
-                } else {
-                    radar.setMarcaModelo("N/I");
-                    radar.setCor("N/I");
-                    radar.setMunicipio("N/I");
-                    radar.setUf("N/I");
-                    radar.setAnoModelo("N/I");
-                    radar.setNomeProprietario("Não Encontrado");
-                    radar.setCpfProprietario("Não Encontrado");
-                }
+                enriquecerRadarComDetran(radar, dados);
             }
         }
 
         return pagina;
     }
 
-    private String extrairCampoHibrido(JsonNode root, String campo, String subCampo) {
+    /**
+     * Enriquece um RadarDTO com os dados retornados pela API do Detran.
+     * Suporta de forma transparente ambos os formatos de payloads:
+     * - Payload 1: proprietario como objeto { "nome": "...", "numeroDocumento": "...", "tipoDocumento": "..." }
+     * - Payload 2: proprietario como string "NOME...", "proprietarioNumeroDocumento": "...", "proprietarioTipoDocumento": "..."
+     */
+    public void enriquecerRadarComDetran(RadarDTO radar, JsonNode dados) {
+        if (radar == null) return;
+
+        if (dados != null && !dados.isEmpty()) {
+            radar.setMarcaModelo(extrairCampoHibrido(dados, "marca", "descricao", "nome"));
+            radar.setCor(extrairCampoHibrido(dados, "cor", "descricao", "nome"));
+            radar.setMunicipio(extrairCampoHibrido(dados, "municipio", "nome", "descricao"));
+            radar.setUf(dados.hasNonNull("uf") ? dados.get("uf").asText().trim() : "N/I");
+            radar.setAnoModelo(dados.hasNonNull("anoModelo") ? dados.get("anoModelo").asText().trim() : "N/I");
+
+            String nome = "N/I";
+            String documento = "N/I";
+
+            if (dados.hasNonNull("proprietario")) {
+                JsonNode propNode = dados.get("proprietario");
+                if (propNode.isObject()) {
+                    // Payload 1: "proprietario": { "nome": "MANUEL ", "numeroDocumento": "0000000", ... }
+                    if (propNode.hasNonNull("nome") && !propNode.get("nome").asText().isBlank()) {
+                        nome = propNode.get("nome").asText().trim();
+                    }
+                    if (propNode.hasNonNull("numeroDocumento") && !propNode.get("numeroDocumento").asText().isBlank()) {
+                        documento = propNode.get("numeroDocumento").asText().trim();
+                    }
+                } else if (propNode.isTextual() && !propNode.asText().isBlank()) {
+                    // Payload 2: "proprietario": "MANUEL THEO "
+                    nome = propNode.asText().trim();
+                }
+            }
+
+            // Payload 2: documento na raiz "proprietarioNumeroDocumento"
+            if ("N/I".equals(documento) && dados.hasNonNull("proprietarioNumeroDocumento") && !dados.get("proprietarioNumeroDocumento").asText().isBlank()) {
+                documento = dados.get("proprietarioNumeroDocumento").asText().trim();
+            }
+
+            radar.setNomeProprietario(nome);
+            radar.setCpfProprietario(documento);
+        } else {
+            radar.setMarcaModelo("N/I");
+            radar.setCor("N/I");
+            radar.setMunicipio("N/I");
+            radar.setUf("N/I");
+            radar.setAnoModelo("N/I");
+            radar.setNomeProprietario("Não Encontrado");
+            radar.setCpfProprietario("Não Encontrado");
+        }
+    }
+
+    private String extrairCampoHibrido(JsonNode root, String campo, String... subCampos) {
         if (!root.hasNonNull(campo)) return "N/I";
         JsonNode node = root.get(campo);
-        if (node.isObject() && node.hasNonNull(subCampo)) {
-            return node.get(subCampo).asText(); // Formato Objeto (v3)
+        if (node.isObject()) {
+            for (String subCampo : subCampos) {
+                if (node.hasNonNull(subCampo) && !node.get(subCampo).asText().isBlank()) {
+                    return node.get(subCampo).asText().trim();
+                }
+            }
+            return "N/I";
         }
-        return node.asText(); // Formato Texto Direto (v1)
+        return node.asText().trim();
     }
 }

@@ -6,9 +6,9 @@ import com.coruja.dto.RadarDTO;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -25,6 +25,9 @@ public class RealtimeUpdateService {
     // Ferramenta do Spring para enviar mensagens para os clientes WebSocket
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
+
+    @Value("${radares.limite-atraso-minutos:15}")
+    private long limiteAtrasoMinutos = 15;
 
     // Mapa para armazenar o último radar de cada concessionária.
     // Usamos ConcurrentHashMap para segurança em ambientes com múltiplas threads.
@@ -53,19 +56,19 @@ public class RealtimeUpdateService {
             }
 
             RadarDTO radarData = new RadarDTO();
-            String concessionaria = parts[0].toUpperCase();
+            String concessionaria = parts[0].trim().toUpperCase();
 
             // Usamos um switch para lidar com os diferentes formatos de cada concessionária
             switch (concessionaria) {
                 case "RONDON":
                     if (parts.length >= 7) {
                         radarData.setConcessionaria("Rondon");
-                        radarData.setData(LocalDate.parse(parts[1]));
-                        radarData.setHora(LocalTime.parse(parts[2]));
-                        radarData.setPlaca(parts[3]);
-                        radarData.setRodovia(parts[4]);
-                        radarData.setKm(parts[5]);
-                        radarData.setSentido(parts[6]);
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setRodovia(parts[4].trim());
+                        radarData.setKm(parts[5].trim());
+                        radarData.setSentido(parts[6].trim());
                         radarData.setPraca("N/A"); // Rondon não envia praça neste formato
                     }
                     break;
@@ -73,41 +76,78 @@ public class RealtimeUpdateService {
                 case "ENTREVIAS":
                     if (parts.length >= 8) {
                         radarData.setConcessionaria("Entrevias");
-                        radarData.setData(LocalDate.parse(parts[1]));
-                        radarData.setHora(LocalTime.parse(parts[2]));
-                        radarData.setPlaca(parts[3]);
-                        radarData.setPraca(parts[4]);
-                        radarData.setRodovia(parts[5]);
-                        radarData.setKm(parts[6]);
-                        radarData.setSentido(parts[7]);
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setPraca(parts[4].trim());
+                        radarData.setRodovia(parts[5].trim());
+                        radarData.setKm(parts[6].trim());
+                        radarData.setSentido(parts[7].trim());
                     }
                     break;
 
                 case "CART":
                     if (parts.length >= 8) {
                         radarData.setConcessionaria("Cart");
-                        radarData.setData(LocalDate.parse(parts[1]));
-                        radarData.setHora(LocalTime.parse(parts[2]));
-                        radarData.setPlaca(parts[3]);
-                        radarData.setPraca(parts[4]);
-                        radarData.setRodovia(parts[5]);
-                        radarData.setKm(parts[6]);
-                        radarData.setSentido(parts[7]);
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setPraca(parts[4].trim());
+                        radarData.setRodovia(parts[5].trim());
+                        radarData.setKm(parts[6].trim());
+                        radarData.setSentido(parts[7].trim());
                     }
                     break;
 
                 case "EIXO":
-                    // Adicione aqui a lógica de mapeamento para CART e EIXO se forem diferentes
-                    // Assumindo que eles também usam o formato de 8 partes como o Entrevias
                     if (parts.length >= 8) {
-                        radarData.setConcessionaria(concessionaria);
-                        radarData.setData(LocalDate.parse(parts[1]));
-                        radarData.setHora(LocalTime.parse(parts[2]));
-                        radarData.setPlaca(parts[3]);
-                        radarData.setPraca(parts[4]);
-                        radarData.setRodovia(parts[5]);
-                        radarData.setKm(parts[6]);
-                        radarData.setSentido(parts[7]);
+                        radarData.setConcessionaria("Eixo");
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setPraca(parts[4].trim());
+                        radarData.setRodovia(parts[5].trim());
+                        radarData.setKm(parts[6].trim());
+                        radarData.setSentido(parts[7].trim());
+                    }
+                    break;
+
+                case "MONITORASP":
+                    if (parts.length >= 6) {
+                        radarData.setConcessionaria("MonitoraSP");
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setRodovia(parts[4].trim());
+                        radarData.setSentido(parts[5].trim());
+                        radarData.setPraca("N/A");
+                        radarData.setKm("N/A");
+                    }
+                    break;
+
+                case "PANTANAL", "MOTIVA":
+                    if (parts.length >= 6) {
+                        radarData.setConcessionaria("Pantanal");
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setRodovia(parts[4].trim());
+                        radarData.setSentido(parts[5].trim());
+                        radarData.setPraca("N/A");
+                        radarData.setKm("N/A");
+                    }
+                    break;
+
+                case "APPIA":
+                    if (parts.length >= 6) {
+                        radarData.setConcessionaria("Appia");
+                        radarData.setData(LocalDate.parse(parts[1].trim()));
+                        radarData.setHora(LocalTime.parse(parts[2].trim()));
+                        radarData.setPlaca(parts[3].trim());
+                        radarData.setRodovia(parts[4].trim());
+                        radarData.setSentido(parts[5].trim());
+                        radarData.setPraca("N/A");
+                        radarData.setKm("N/A");
                     }
                     break;
 
@@ -118,8 +158,10 @@ public class RealtimeUpdateService {
 
             // Se o objeto foi populado (placa não é nula), envia para o WebSocket
             if (radarData.getPlaca() != null) {
+                // Calcula o atraso em tempo real (com base na tolerância configurada)
+                radarData.calcularAtraso(limiteAtrasoMinutos);
                 // 1. Guarda o último radar no nosso mapa interno.
-                lastRadarByConcessionaria.put(radarData.getConcessionaria().toUpperCase(), radarData);
+                lastRadarByConcessionaria.put(radarData.getConcessionaria().trim().toUpperCase(), radarData);
                 // 2. Envia para o frontend via WebSocket.
                 messagingTemplate.convertAndSend("/topic/last-radar", radarData);
                 //logger.info("Último radar da {} enviado para o frontend via WebSocket.", radarData.getConcessionaria());

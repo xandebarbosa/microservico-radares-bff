@@ -49,7 +49,8 @@ public class SecurityConfig {
                         // ✅ LIBERA O SWAGGER
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         // ✅ CRÍTICO: Libera TODOS os endpoints do WebSocket/SockJS PRIMEIRO
-                        .requestMatchers("/ws/**").permitAll()
+                        .requestMatchers("/ws", "/ws/**").permitAll()
+                        .requestMatchers("/error").permitAll()
                         .requestMatchers("/actuator/**", "/health").permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         // Todos os outros endpoints exigem autenticação
