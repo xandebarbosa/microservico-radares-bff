@@ -1,11 +1,9 @@
 package com.coruja.config;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
-import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
 import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JCircuitBreakerFactory;
 import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigBuilder;
-import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.cloud.client.circuitbreaker.Customizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,7 +11,8 @@ import org.springframework.context.annotation.Configuration;
 import java.time.Duration;
 
 /**
- * Configuração do Circuit Breaker para RestTemplate (não-reativo).
+ * Configuração do Circuit Breaker resiliente para RestTemplate.
+ * Protege contra timeouts infinitos e cascata de falhas quando um serviço cai.
  */
 @Configuration
 public class CircuitBreakerConfiguration {
@@ -22,22 +21,22 @@ public class CircuitBreakerConfiguration {
     public Customizer<Resilience4JCircuitBreakerFactory> defaultCustomizer() {
         return factory -> factory.configureDefault(id -> new Resilience4JConfigBuilder(id)
                 .timeLimiterConfig(TimeLimiterConfig.custom()
-                        .timeoutDuration(Duration.ofMinutes(5))
+                        // Timeout máximo de 8s para chamadas síncronas entre microserviços
+                        .timeoutDuration(Duration.ofSeconds(8))
                         .build())
                 .circuitBreakerConfig(CircuitBreakerConfig.custom()
-                        // Threshold de falhas para abrir o circuito (50%)
+                        // Abre o circuito se 50% das chamadas falharem
                         .failureRateThreshold(50)
-                        // Número mínimo de chamadas antes de calcular taxa de falha
+                        // Avalia após 5 chamadas mínimas
                         .minimumNumberOfCalls(5)
-                        // Tempo que o circuito fica aberto (30s)
-                        .waitDurationInOpenState(Duration.ofSeconds(30))
-                        // Número de chamadas permitidas no estado half-open
-                        .permittedNumberOfCallsInHalfOpenState(5)
-                        // Threshold de chamadas lentas (50%)
+                        // Mantém aberto por 15s (retorna fallback instantâneo sem onerar rede)
+                        .waitDurationInOpenState(Duration.ofSeconds(15))
+                        // Testa 3 chamadas para verificar recuperação do serviço
+                        .permittedNumberOfCallsInHalfOpenState(3)
+                        // Chamadas acima de 4s são consideradas lentas
                         .slowCallRateThreshold(50)
-                        // Duração para considerar uma chamada lenta (5s)
-                        .slowCallDurationThreshold(Duration.ofSeconds(5))
-                        .slidingWindowSize(100)
+                        .slowCallDurationThreshold(Duration.ofSeconds(4))
+                        .slidingWindowSize(20)
                         .build())
                 .build());
     }

@@ -56,6 +56,7 @@ public class RadarsBFFService {
 
     // ─── Dependências ───────────────────────────────────────────────────────────
     private final RestTemplate            loadBalancedRestTemplate;
+    private final RestTemplate            fastLoadBalancedRestTemplate;
     private final RestTemplate            directRestTemplate;
     private final RealtimeUpdateService   realtimeUpdateService;
     private final CircuitBreakerFactory   circuitBreakerFactory;
@@ -75,7 +76,7 @@ public class RadarsBFFService {
     private volatile String ultimoIdMonitoraSPEnviado = "";
     private volatile String ultimoIdEntreviasEnviado = "";
     private volatile String ultimoIdCartEnviado = "";
-    private volatile String ultimoIdPantanalEnviado = "";
+    private volatile String ultimoIdMotivaEnviado = "";
     private volatile String ultimoIdAppiaEnviado = "";
     private volatile String ultimoIdEixoEnviado = "";
 
@@ -86,17 +87,31 @@ public class RadarsBFFService {
     private long limiteAtrasoMinutos = 15;
 
     private final Semaphore detranRateLimiter = new Semaphore(15);
-    // ─── Construtor ─────────────────────────────────────────────────────────────
+    // ─── Construtores ───────────────────────────────────────────────────────────
     public RadarsBFFService(
             RestTemplate loadBalancedRestTemplate,
+            RestTemplate directRestTemplate,
+            RealtimeUpdateService realtimeUpdateService,
+            CircuitBreakerFactory circuitBreakerFactory,
+            SimpMessagingTemplate messagingTemplate,
+            DetranService detranService
+    ) {
+        this(loadBalancedRestTemplate, loadBalancedRestTemplate, directRestTemplate, realtimeUpdateService, circuitBreakerFactory, messagingTemplate, detranService);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public RadarsBFFService(
+            RestTemplate loadBalancedRestTemplate,
+            @Qualifier("fastLoadBalancedRestTemplate") RestTemplate fastLoadBalancedRestTemplate,
             @Qualifier("directRestTemplate") RestTemplate directRestTemplate,
             RealtimeUpdateService realtimeUpdateService,
             CircuitBreakerFactory circuitBreakerFactory,
             SimpMessagingTemplate messagingTemplate,
             DetranService detranService
     ) {
-        this.loadBalancedRestTemplate = loadBalancedRestTemplate;
-        this.directRestTemplate       = directRestTemplate;
+        this.loadBalancedRestTemplate     = loadBalancedRestTemplate;
+        this.fastLoadBalancedRestTemplate = fastLoadBalancedRestTemplate;
+        this.directRestTemplate           = directRestTemplate;
         this.realtimeUpdateService    = realtimeUpdateService;
         this.circuitBreakerFactory    = circuitBreakerFactory;
         this.messagingTemplate        = messagingTemplate;
@@ -121,6 +136,7 @@ public class RadarsBFFService {
         serviceUrlMap.put("rondon",     "MICROSERVICO-RADARES-RONDON");
         serviceUrlMap.put("monitorasp", "MICROSERVICO-RADARES-MONITORASP");
         serviceUrlMap.put("motiva",     "MICROSERVICO-RADARES-PANTANAL");
+        //serviceUrlMap.put("pantanal",   "MICROSERVICO-RADARES-PANTANAL");
         serviceUrlMap.put("appia",      "MICROSERVICO-RADARES-APPIA");
 
         log.info("Mapa de serviços carregado: {}", serviceUrlMap);
@@ -136,7 +152,7 @@ public class RadarsBFFService {
     // 1. BUSCA POR PLACA
     // ==================================================================================
     public RadarPageDTO buscarPorPlaca(String placa, Pageable pageable) {
-        List<String> urls = new ArrayList<>(serviceUrlMap.values());
+        List<String> urls = getAllUniqueMicroserviceUrls();
         if (urls.isEmpty()) return paginaVazia(pageable);
 
         // 🚀 Passo 1: Dispara a busca do Detran em PARALELO com os radares
@@ -219,7 +235,7 @@ public class RadarsBFFService {
 
         if (CollectionUtils.isEmpty(concessionarias)) {
             // Roteia para todos se a lista vier nula ou vazia
-            urls = new ArrayList<>(serviceUrlMap.values());
+            urls = getAllUniqueMicroserviceUrls();
             log.debug("⚠️ [BFF Local] Nenhuma concessionária especificada. Modo Broadcast ativado.");
         } else {
             // Sanitização pesada: resolve problemas do Spring com @RequestParam List<String>
@@ -228,6 +244,7 @@ public class RadarsBFFService {
                     .flatMap(c -> Arrays.stream(c.split(","))) // Divide caso venha "entrevias,rondon" na mesma string
                     .map(String::trim)
                     .map(String::toLowerCase)
+                    .map(c -> "pantanal".equalsIgnoreCase(c) ? "motiva" : c)
                     .map(serviceUrlMap::get)
                     .filter(Objects::nonNull)
                     .distinct() // Evita requisições duplicadas para o mesmo serviço
@@ -261,17 +278,37 @@ public class RadarsBFFService {
             String rodovia, String praca, String km, String sentido, Pageable pageable
     ) {
         try {
+            boolean isMotiva = baseUrl != null && (baseUrl.toUpperCase().contains("PANTANAL") || baseUrl.toUpperCase().contains("MOTIVA"));
+
+            String rodoviaTratada = isParametroValido(rodovia) ? rodovia.trim() : null;
+            String pracaTratada = isParametroValido(praca) ? praca.trim() : null;
+            String kmTratado = isParametroValido(km) ? km.trim() : null;
+            String sentidoTratado = isParametroValido(sentido) ? sentido.trim() : null;
+
+            // Para a Motiva (serviço MICROSERVICO-RADARES-PANTANAL), o MongoDB busca pelo campo LOCAL (que pode vir como praça ou rodovia)
+            if (isMotiva) {
+                if (rodoviaTratada == null && pracaTratada != null) {
+                    rodoviaTratada = pracaTratada;
+                } else if (pracaTratada == null && rodoviaTratada != null) {
+                    pracaTratada = rodoviaTratada;
+                }
+            }
+
             String urlBase = "http://" + baseUrl + "/radares/busca-local";
 
-            // UriComponentsBuilder remove automaticamente parâmetros nulos
+            // Se for Motiva (MICROSERVICO-RADARES-PANTANAL) e houver filtro por sentido, não enviamos o parâmetro na URL
+            // para contornar discrepâncias de case no Mongo (NORTE vs Norte) da versão em container,
+            // realizando a filtragem precisa e tolerante em memória logo após o retorno.
+            String sentidoNaUrl = isMotiva ? null : sentidoTratado;
+
             UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(urlBase)
                     .queryParamIfPresent("data", Optional.ofNullable(data != null ? data.toString() : null))
                     .queryParamIfPresent("horaInicial", Optional.ofNullable(horaInicial != null ? horaInicial.toString() : null))
                     .queryParamIfPresent("horaFinal", Optional.ofNullable(horaFinal != null ? horaFinal.toString() : null))
-                    .queryParamIfPresent("rodovia", Optional.ofNullable(rodovia))
-                    .queryParamIfPresent("km", Optional.ofNullable(km))
-                    .queryParamIfPresent("sentido", Optional.ofNullable(sentido))
-                    .queryParamIfPresent("praca", Optional.ofNullable(praca))
+                    .queryParamIfPresent("rodovia", Optional.ofNullable(rodoviaTratada))
+                    .queryParamIfPresent("km", Optional.ofNullable(kmTratado))
+                    .queryParamIfPresent("sentido", Optional.ofNullable(sentidoNaUrl))
+                    .queryParamIfPresent("praca", Optional.ofNullable(pracaTratada))
                     .queryParam("page", pageable.getPageNumber())
                     .queryParam("size", pageable.getPageSize());
 
@@ -281,10 +318,21 @@ public class RadarsBFFService {
             String cbName = "radaresLocal-" + baseUrl.toLowerCase().replace("microservico-radares-", "");
 
             return circuitBreakerFactory.create(cbName).run(() -> {
-                // Chamada direta com a URL final já codificada e limpa
                 ResponseEntity<JsonNode> response = loadBalancedRestTemplate.getForEntity(urlFinal, JsonNode.class);
 
                 RadarPageDTO result = parseJsonNodeToPage(response.getBody(), baseUrl);
+
+                // Se for Motiva e o chamador filtrou por sentido, refinamos em memória
+                if (isMotiva && sentidoTratado != null && result.getContent() != null && !result.getContent().isEmpty()) {
+                    List<RadarDTO> filtrados = result.getContent().stream()
+                            .filter(r -> sentidosBatem(r.getSentido(), sentidoTratado))
+                            .toList();
+                    result.setContent(filtrados);
+                    if (result.getPage() != null) {
+                        result.getPage().setTotalElements(filtrados.size());
+                    }
+                }
+
                 log.info("✅ [BFF Local] Sucesso: {} registros de {}", result.getContent().size(), baseUrl);
                 return result;
             }, throwable -> {
@@ -312,6 +360,9 @@ public class RadarsBFFService {
 
         if (concessionaria != null && !concessionaria.trim().isEmpty()) {
             String concKey = concessionaria.trim().toLowerCase();
+            if ("pantanal".equalsIgnoreCase(concKey)) {
+                concKey = "motiva";
+            }
             String baseUrl = serviceUrlMap.get(concKey);
 
             if (baseUrl != null) {
@@ -389,7 +440,7 @@ public class RadarsBFFService {
             Double latitude, Double longitude, Double raio,
             LocalDate data, LocalTime horaInicio, LocalTime horaFim, Pageable pageable) {
 
-        List<String> urls = new ArrayList<>(serviceUrlMap.values());
+        List<String> urls = getAllUniqueMicroserviceUrls();
         if (urls.isEmpty()) return paginaVazia(pageable);
 
         List<CompletableFuture<RadarPageDTO>> futures = urls.stream()
@@ -439,7 +490,7 @@ public class RadarsBFFService {
             Double latitude, Double longitude, Double raio,
             LocalDate data, LocalTime horaInicio, LocalTime horaFim
     ) {
-        List<String> urls = new ArrayList<>(serviceUrlMap.values());
+        List<String> urls = getAllUniqueMicroserviceUrls();
         if (urls.isEmpty()) return Collections.emptyList();
 
         List<CompletableFuture<List<RadarDTO>>> futures = urls.stream()
@@ -482,7 +533,7 @@ public class RadarsBFFService {
 
         // 1. Blindagem e Sanitização (Semelhante ao buscarPorLocal)
         if (CollectionUtils.isEmpty(concessionarias)) {
-            urls = new ArrayList<>(serviceUrlMap.values());
+            urls = getAllUniqueMicroserviceUrls();
             log.warn("⚠️ [BFF Exportação] Nenhuma concessionária informada. Modo Broadcast ativado.");
         } else {
             urls = concessionarias.stream()
@@ -490,6 +541,7 @@ public class RadarsBFFService {
                     .flatMap(c -> Arrays.stream(c.split(","))) // Divide caso venha agrupado "entrevias,rondon"
                     .map(String::trim)
                     .map(String::toLowerCase)
+                    .map(c -> "pantanal".equalsIgnoreCase(c) ? "motiva" : c)
                     .map(serviceUrlMap::get)
                     .filter(Objects::nonNull)
                     .distinct() // Evita duplicidade de chamadas
@@ -600,7 +652,12 @@ public class RadarsBFFService {
 
         realtimeUpdateService.getLatestRadars().forEach((concessionaria, radar) -> {
             if (radar != null && concessionaria != null && !concessionaria.isBlank()) {
-                mapaPorConcessionaria.put(concessionaria.trim().toUpperCase(), radar);
+                String concKey = concessionaria.trim().toUpperCase();
+                if ("PANTANAL".equals(concKey)) {
+                    concKey = "MOTIVA";
+                }
+                radar.setConcessionaria(formatarNomeConcessionaria(radar.getConcessionaria() != null ? radar.getConcessionaria() : concKey));
+                mapaPorConcessionaria.put(concKey, radar);
             }
         });
 
@@ -609,6 +666,10 @@ public class RadarsBFFService {
         for (RadarDTO radar : doBanco) {
             if (radar != null && radar.getConcessionaria() != null && !radar.getConcessionaria().isBlank()) {
                 String concKey = radar.getConcessionaria().trim().toUpperCase();
+                if ("PANTANAL".equals(concKey)) {
+                    concKey = "MOTIVA";
+                    radar.setConcessionaria("Motiva");
+                }
                 mapaPorConcessionaria.merge(concKey, radar, (existente, novo) -> {
                     LocalDateTime dtExistente = extrairLocalDateTime(existente);
                     LocalDateTime dtNovo = extrairLocalDateTime(novo);
@@ -621,9 +682,9 @@ public class RadarsBFFService {
 
         // 3. Garante que TODAS as concessionárias configuradas estejam representadas no Dashboard
         Set<String> concessionariasEsperadas = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        concessionariasEsperadas.addAll(List.of("CART", "EIXO", "ENTREVIAS", "RONDON", "MONITORASP", "PANTANAL", "APPIA"));
+        concessionariasEsperadas.addAll(List.of("CART", "EIXO", "ENTREVIAS", "RONDON", "MONITORASP", "MOTIVA", "APPIA"));
         for (String k : serviceUrlMap.keySet()) {
-            if (!k.equalsIgnoreCase("motiva")) {
+            if (!k.equalsIgnoreCase("motiva") && !k.equalsIgnoreCase("pantanal")) {
                 concessionariasEsperadas.add(k.toUpperCase());
             }
         }
@@ -718,21 +779,22 @@ public class RadarsBFFService {
     }
 
     private List<RadarDTO> fetchUltimosPorServico(String servico) {
-        String baseUrl = serviceUrlMap.get(servico.toLowerCase());
+        String servicoKey = "pantanal".equalsIgnoreCase(servico) ? "motiva" : servico.toLowerCase();
+        String baseUrl = serviceUrlMap.get(servicoKey);
         if (baseUrl == null || baseUrl.isBlank()) {
             return Collections.emptyList();
         }
 
         String url = "http://" + baseUrl + "/radares/ultimos?limite=1";
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(url, RadarDTO[].class);
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(url, RadarDTO[].class);
             RadarDTO[] body = resp.getBody();
 
             if (body != null && body.length > 0) {
-                log.info("✅ Recuperado último registro da {}.", servico.toUpperCase());
+                log.info("✅ Recuperado último registro da {}.", servicoKey.toUpperCase());
                 for (RadarDTO r : body) {
                     if (r != null) {
-                        r.setConcessionaria(formatarNomeConcessionaria(servico));
+                        r.setConcessionaria(formatarNomeConcessionaria(servicoKey));
                     }
                 }
                 return Arrays.asList(body);
@@ -763,7 +825,7 @@ public class RadarsBFFService {
             case "entrevias" -> "Entrevias";
             case "rondon" -> "Rondon";
             case "monitorasp" -> "MonitoraSP";
-            case "motiva" -> "Motiva";
+            case "motiva", "pantanal" -> "Motiva";
             case "appia" -> "Appia";
             default -> Character.toUpperCase(lower.charAt(0)) + (lower.length() > 1 ? lower.substring(1) : "");
         };
@@ -918,9 +980,12 @@ public class RadarsBFFService {
 
             // 🚀 A BLINDAGEM: Se o JSON veio sem concessionária, o BFF injeta baseado no nome do microsserviço chamado
             String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
+            if ("pantanal".equalsIgnoreCase(concName)) {
+                concName = "motiva";
+            }
             for (RadarDTO dto : content) {
-                if (dto.getConcessionaria() == null || dto.getConcessionaria().trim().isEmpty()) {
-                    dto.setConcessionaria(concName);
+                if (dto.getConcessionaria() == null || dto.getConcessionaria().trim().isEmpty() || "pantanal".equalsIgnoreCase(dto.getConcessionaria())) {
+                    dto.setConcessionaria(formatarNomeConcessionaria(concName));
                 }
             }
         }
@@ -956,7 +1021,7 @@ public class RadarsBFFService {
     }
 
     private <T> List<T> fetchListFromAll(String endpointSuffix, Class<T> itemType) {
-        List<CompletableFuture<List<T>>> futures = serviceUrlMap.values().stream()
+        List<CompletableFuture<List<T>>> futures = getAllUniqueMicroserviceUrls().stream()
                 .map(baseUrl -> CompletableFuture.supplyAsync(() ->
                                 executeCircuitBreakerListRequest(
                                         "genericList", baseUrl,
@@ -1133,9 +1198,12 @@ public class RadarsBFFService {
 
                     // 🚀 A BLINDAGEM PARA O EXCEL
                     String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
+                    if ("pantanal".equalsIgnoreCase(concName)) {
+                        concName = "motiva";
+                    }
                     for (RadarDTO dto : batch) {
-                        if (dto.getConcessionaria() == null || dto.getConcessionaria().trim().isEmpty()) {
-                            dto.setConcessionaria(concName);
+                        if (dto.getConcessionaria() == null || dto.getConcessionaria().trim().isEmpty() || "pantanal".equalsIgnoreCase(dto.getConcessionaria())) {
+                            dto.setConcessionaria(formatarNomeConcessionaria(concName));
                         }
                     }
 
@@ -1244,9 +1312,12 @@ public class RadarsBFFService {
 
                     // 2. Blindagem de segurança: Garante a concessionária correta
                     String concName = baseUrl.replace("MICROSERVICO-RADARES-", "").toLowerCase();
+                    if ("pantanal".equalsIgnoreCase(concName)) {
+                        concName = "motiva";
+                    }
                     for (RadarLocationDTO r : results) {
-                        if (r.getConcessionaria() == null || r.getConcessionaria().isBlank()) {
-                            r.setConcessionaria(concName);
+                        if (r.getConcessionaria() == null || r.getConcessionaria().isBlank() || "pantanal".equalsIgnoreCase(r.getConcessionaria())) {
+                            r.setConcessionaria(formatarNomeConcessionaria(concName));
                         }
                     }
 
@@ -1291,7 +1362,7 @@ public class RadarsBFFService {
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class);
 
             if (resp.getBody() != null && resp.getBody().length > 0) {
@@ -1317,7 +1388,7 @@ public class RadarsBFFService {
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class);
 
             if (resp.getBody() != null && resp.getBody().length > 0) {
@@ -1343,7 +1414,7 @@ public class RadarsBFFService {
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class);
 
             if (resp.getBody() != null && resp.getBody().length > 0) {
@@ -1372,7 +1443,7 @@ public class RadarsBFFService {
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class);
 
             if (resp.getBody() != null && resp.getBody().length > 0) {
@@ -1398,7 +1469,7 @@ public class RadarsBFFService {
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
             );
 
@@ -1427,7 +1498,7 @@ public class RadarsBFFService {
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
             );
             if (resp.getBody() != null && resp.getBody().length > 0) {
@@ -1450,24 +1521,24 @@ public class RadarsBFFService {
     }
 
     @Scheduled(fixedDelay = 15000)
-    public void atualizarPantanalNoPainel() {
+    public void atualizarMotivaNoPainel() {
         String baseUrl = serviceUrlMap.get("motiva");
         if (baseUrl == null) return;
 
         try {
-            ResponseEntity<RadarDTO[]> resp = loadBalancedRestTemplate.getForEntity(
+            ResponseEntity<RadarDTO[]> resp = fastLoadBalancedRestTemplate.getForEntity(
                     "http://" + baseUrl + "/radares/ultimos?limite=1", RadarDTO[].class
             );
             if (resp.getBody() != null && resp.getBody().length > 0) {
                 RadarDTO recente = resp.getBody()[0];
                 String id = String.valueOf(recente.getId());
 
-                if (!id.equals(ultimoIdPantanalEnviado)) {
-                    ultimoIdPantanalEnviado = id;
-                    recente.setConcessionaria("Pantanal");
+                if (!id.equals(ultimoIdMotivaEnviado)) {
+                    ultimoIdMotivaEnviado = id;
+                    recente.setConcessionaria("Motiva");
                     recente.calcularAtraso(limiteAtrasoMinutos);
-                    realtimeUpdateService.getLatestRadars().put("PANTANAL", recente);
-                    log.info("🦉 [Scheduler] Nova passagem da Pantanal (Placa: {} - Data: {} - Hora: {})",
+                    realtimeUpdateService.getLatestRadars().put("MOTIVA", recente);
+                    log.info("🦉 [Scheduler] Nova passagem da Motiva (Placa: {} - Data: {} - Hora: {})",
                             recente.getPlaca(), recente.getData(), recente.getHora());
                     messagingTemplate.convertAndSend("/topic/last-radar", recente);
                 }
@@ -1487,9 +1558,16 @@ public class RadarsBFFService {
 
     private String resolveBaseUrl(String concessionaria, String fallback) {
         String key = (concessionaria != null && !concessionaria.isBlank())
-                ? concessionaria.toLowerCase()
+                ? concessionaria.toLowerCase().trim()
                 : fallback;
+        if ("pantanal".equalsIgnoreCase(key)) {
+            key = "motiva";
+        }
         return serviceUrlMap.get(key);
+    }
+
+    private List<String> getAllUniqueMicroserviceUrls() {
+        return serviceUrlMap.values().stream().distinct().toList();
     }
 
     private String getMonitoramentoUrl(String path) {
@@ -1663,4 +1741,39 @@ public class RadarsBFFService {
         }
         return node.asText().trim();
     }
+
+    private boolean isParametroValido(String valor) {
+        if (valor == null || valor.isBlank()) return false;
+        String v = valor.trim();
+        return !v.equalsIgnoreCase("N/I") &&
+               !v.equalsIgnoreCase("N/A") &&
+               !v.equalsIgnoreCase("null") &&
+               !v.equalsIgnoreCase("undefined") &&
+               !v.equalsIgnoreCase("DESCONHECIDO");
+    }
+
+    private boolean sentidosBatem(String s1, String s2) {
+        if (s1 == null || s2 == null) return false;
+        String str1 = s1.trim().toUpperCase();
+        String str2 = s2.trim().toUpperCase();
+        if (str1.equals(str2)) return true;
+
+        String norm1 = normalizarSentido(str1);
+        String norm2 = normalizarSentido(str2);
+        return norm1.equals(norm2);
+    }
+
+    private String normalizarSentido(String s) {
+        if (s == null) return "";
+        return switch (s.trim().toUpperCase()) {
+            case "N", "NORTE" -> "NORTE";
+            case "S", "SUL" -> "SUL";
+            case "L", "LESTE" -> "LESTE";
+            case "O", "OESTE" -> "OESTE";
+            case "INT", "INTERIOR" -> "INTERIOR";
+            case "CAP", "CAPITAL" -> "CAPITAL";
+            default -> s.trim().toUpperCase();
+        };
+    }
+
 }

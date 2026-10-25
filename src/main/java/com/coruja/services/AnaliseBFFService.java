@@ -1,6 +1,5 @@
 package com.coruja.services;
 
-import com.coruja.dto.RadarDTO;
 import com.coruja.exceptions.DetranIndisponivelException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -50,8 +49,9 @@ public class AnaliseBFFService {
                 .toUriString();
 
         try {
-            HttpServletRequest request = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getRequest();
-            String authHeader = request.getHeader("Authorization");
+            ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+            HttpServletRequest request = attributes != null ? attributes.getRequest() : null;
+            String authHeader = request != null ? request.getHeader("Authorization") : null;
 
             HttpHeaders headers = new HttpHeaders();
             if (authHeader != null) {
@@ -75,21 +75,23 @@ public class AnaliseBFFService {
     }
 
     public JsonNode buscarComboioPorPassagens(JsonNode requestBody) {
-        log.info("🎯 [BFF] Repassando JSON estruturado do React diretamente para o Quarkus...");
+        log.info("🎯 [BFF] Repassando JSON estruturado do React para o serviço de Análise Inteligente...");
 
         String url = "http://" + ANALISE_SERVICE_NAME + "/analise/comboio/passagens";
 
         try {
-            HttpServletRequest request = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getRequest();
-            String authHeader = request.getHeader("Authorization");
+            // Sanitiza o requestBody para assegurar que locais, concessionária (Motiva/Pantanal) e dados de passagem estejam consistentes
+            JsonNode payloadSanitizado = sanitizarRequestBodyPassagens(requestBody);
+
+            ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+            HttpServletRequest request = attributes != null ? attributes.getRequest() : null;
+            String authHeader = request != null ? request.getHeader("Authorization") : null;
 
             HttpHeaders headers = new HttpHeaders();
             if (authHeader != null) headers.set("Authorization", authHeader);
             headers.setContentType(MediaType.APPLICATION_JSON);
 
-            // 💡 A SOLUÇÃO FINAL: Como o React já manda os campos "data" e "hora" corretos,
-            // passamos o JsonNode direto. O RestTemplate faz a serialização JSON nativa perfeita!
-            HttpEntity<JsonNode> entity = new HttpEntity<>(requestBody, headers);
+            HttpEntity<JsonNode> entity = new HttpEntity<>(payloadSanitizado, headers);
 
             ResponseEntity<JsonNode> response = analysisRestTemplate.exchange(url, HttpMethod.POST, entity, JsonNode.class);
             JsonNode resultados = response.getBody();
@@ -97,7 +99,6 @@ public class AnaliseBFFService {
             return enriquecerComDadosDoDetran(resultados);
 
         } catch (DetranIndisponivelException e) {
-            // O interceptador do Spring vai pegar essa exceção e retornar o HTTP 503 pro frontend
             log.warn("⚠️ [BFF] Análise de passagens abortada: {}", e.getMessage());
             throw e;
         } catch (Exception e) {
@@ -107,7 +108,68 @@ public class AnaliseBFFService {
     }
 
     /**
-     * Recebe a lista de suspeitos da IA e injeta os dados do Detran de forma reativa e híbrida
+     * Sanitiza os nós de passagens para assegurar compatibilidade e precisão:
+     * 1. Concessionária: normaliza "pantanal" para "Motiva".
+     * 2. Praça e Rodovia: na Motiva, a praça/local é o identificador físico (ex: BURI, PEDRO GOMES).
+     *    Se rodovia vier "N/I" e praça válida, sincroniza. Se praça vier "N/I" e rodovia válida, sincroniza.
+     * 3. KM: remove placeholders inválidos ("N/I", "N/A", "null") para não poluir consultas de cruzamento.
+     */
+    private JsonNode sanitizarRequestBodyPassagens(JsonNode requestBody) {
+        if (requestBody == null || !requestBody.isObject()) {
+            return requestBody;
+        }
+
+        JsonNode passagensNode = requestBody.get("passagens");
+        if (passagensNode != null && passagensNode.isArray()) {
+            for (JsonNode pNode : passagensNode) {
+                if (pNode instanceof ObjectNode objPassagem) {
+                    // 1. Normaliza Concessionária
+                    if (objPassagem.hasNonNull("concessionaria")) {
+                        String conc = objPassagem.get("concessionaria").asText().trim();
+                        if ("pantanal".equalsIgnoreCase(conc) || "motiva".equalsIgnoreCase(conc)) {
+                            objPassagem.put("concessionaria", "Motiva");
+                        }
+                    }
+
+                    // 2. Harmonização entre rodovia e praça
+                    String rodovia = objPassagem.hasNonNull("rodovia") ? objPassagem.get("rodovia").asText().trim() : null;
+                    String praca = objPassagem.hasNonNull("praca") ? objPassagem.get("praca").asText().trim() : null;
+
+                    boolean rodoviaValida = isTextoValido(rodovia);
+                    boolean pracaValida = isTextoValido(praca);
+
+                    if (!rodoviaValida && pracaValida) {
+                        objPassagem.put("rodovia", praca);
+                    } else if (rodoviaValida && !pracaValida) {
+                        objPassagem.put("praca", rodovia);
+                    }
+
+                    // 3. Sanitização de KM
+                    if (objPassagem.hasNonNull("km")) {
+                        String km = objPassagem.get("km").asText().trim();
+                        if (!isTextoValido(km)) {
+                            objPassagem.putNull("km");
+                        }
+                    }
+                }
+            }
+        }
+        return requestBody;
+    }
+
+    private boolean isTextoValido(String val) {
+        if (val == null || val.isBlank()) return false;
+        String v = val.trim();
+        return !v.equalsIgnoreCase("N/I") &&
+               !v.equalsIgnoreCase("N/A") &&
+               !v.equalsIgnoreCase("null") &&
+               !v.equalsIgnoreCase("undefined") &&
+               !v.equalsIgnoreCase("DESCONHECIDO");
+    }
+
+    /**
+     * Recebe a lista de suspeitos da IA e injeta os dados do Detran de forma reativa e híbrida,
+     * garantindo também a normalização das concessionárias (ex: Motiva) e preenchimento de praças nos encontros.
      */
     private JsonNode enriquecerComDadosDoDetran(JsonNode resultados) {
         if (resultados != null && resultados.isArray()) {
@@ -116,19 +178,23 @@ public class AnaliseBFFService {
 
                 for (JsonNode node : resultados) {
                     if (node instanceof ObjectNode objNode) {
-                        String placaSuspeita = objNode.has("placa") ? objNode.get("placa").asText() : null;
+                        // Normaliza encontros dos suspeitos (concessionária Motiva e praça/rodovia)
+                        normalizarEncontros(objNode);
 
-                        if (placaSuspeita != null) {
+                        String placaSuspeita = objNode.hasNonNull("placa") ? objNode.get("placa").asText() : null;
+
+                        if (placaSuspeita != null && !placaSuspeita.isBlank()) {
                             futures.add(CompletableFuture.runAsync(() -> {
                                 try {
                                     JsonNode dadosDetran = detranService.consultarVeiculo(placaSuspeita);
                                     if (dadosDetran != null) {
                                         objNode.put("marcaModelo", extrairCampoHibrido(dadosDetran, "marca"));
                                         objNode.put("cor", extrairCampoHibrido(dadosDetran, "cor"));
-                                        objNode.put("municipio", extrairCampoHibrido(dadosDetran, "municipio", "nome"));
+                                        objNode.put("municipio", extrairMunicipio(dadosDetran));
                                         objNode.put("uf", extrairCampoHibrido(dadosDetran, "uf"));
                                         objNode.put("anoModelo", extrairCampoHibrido(dadosDetran, "anoModelo"));
                                         objNode.put("nomeProprietario", extrairNomeProprietario(dadosDetran));
+                                        objNode.put("cpfProprietario", extrairDocumentoProprietario(dadosDetran));
                                     } else {
                                         preencherComNaoInformado(objNode);
                                     }
@@ -148,7 +214,6 @@ public class AnaliseBFFService {
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
                 } catch (CompletionException e) {
                     log.error("Erro inesperado durante processamento paralelo das placas: {}", e.getMessage());
-                    // Se for um erro crítico de infraestrutura (falta de memória, etc), lançamos.
                     throw e;
                 }
             }
@@ -156,13 +221,68 @@ public class AnaliseBFFService {
         return resultados;
     }
 
+    /**
+     * Normaliza os encontros dentro de cada suspeito para exibição perfeita no frontend:
+     * - Garante "Motiva" caso venha "pantanal"
+     * - Garante preenchimento de praça caso venha apenas como rodovia (padrão Motiva/Pantanal)
+     */
+    private void normalizarEncontros(ObjectNode objNode) {
+        if (!objNode.hasNonNull("encontros")) return;
+        JsonNode encontrosNode = objNode.get("encontros");
+        if (encontrosNode.isArray()) {
+            for (JsonNode eNode : encontrosNode) {
+                if (eNode instanceof ObjectNode enc) {
+                    if (enc.hasNonNull("concessionaria")) {
+                        String conc = enc.get("concessionaria").asText().trim();
+                        if ("pantanal".equalsIgnoreCase(conc) || "motiva".equalsIgnoreCase(conc)) {
+                            enc.put("concessionaria", "Motiva");
+                        }
+                    }
+                    String praca = enc.hasNonNull("praca") ? enc.get("praca").asText().trim() : "";
+                    String rodovia = enc.hasNonNull("rodovia") ? enc.get("rodovia").asText().trim() : "";
+                    if ((praca.isEmpty() || praca.equalsIgnoreCase("N/I")) && isTextoValido(rodovia)) {
+                        enc.put("praca", rodovia);
+                    }
+                }
+            }
+        }
+    }
+
     private String extrairNomeProprietario(JsonNode node) {
-        if (node == null || !node.hasNonNull("proprietario")) return "N/I";
-        JsonNode prop = node.get("proprietario");
-        if (prop.isObject() && prop.hasNonNull("nome")) {
-            return prop.get("nome").asText();
-        } else if (prop.isTextual()) {
-            return prop.asText();
+        if (node == null) return "N/I";
+        if (node.hasNonNull("proprietario")) {
+            JsonNode prop = node.get("proprietario");
+            if (prop.isObject() && prop.hasNonNull("nome")) {
+                return prop.get("nome").asText();
+            } else if (prop.isTextual()) {
+                return prop.asText();
+            }
+        }
+        return "N/I";
+    }
+
+    private String extrairDocumentoProprietario(JsonNode node) {
+        if (node == null) return "N/I";
+        if (node.hasNonNull("proprietario")) {
+            JsonNode prop = node.get("proprietario");
+            if (prop.isObject() && prop.hasNonNull("numeroDocumento")) {
+                return prop.get("numeroDocumento").asText();
+            }
+        }
+        if (node.hasNonNull("proprietarioNumeroDocumento")) {
+            return node.get("proprietarioNumeroDocumento").asText();
+        }
+        return "N/I";
+    }
+
+    private String extrairMunicipio(JsonNode node) {
+        if (node == null || !node.hasNonNull("municipio")) return "N/I";
+        JsonNode mun = node.get("municipio");
+        if (mun.isObject()) {
+            if (mun.hasNonNull("nome")) return mun.get("nome").asText();
+            if (mun.hasNonNull("descricao")) return mun.get("descricao").asText();
+        } else if (mun.isTextual()) {
+            return mun.asText();
         }
         return "N/I";
     }
@@ -174,6 +294,7 @@ public class AnaliseBFFService {
         objNode.put("uf", "N/I");
         objNode.put("anoModelo", "N/I");
         objNode.put("nomeProprietario", "N/I");
+        objNode.put("cpfProprietario", "N/I");
     }
 
     /**
@@ -201,7 +322,6 @@ public class AnaliseBFFService {
         if (pai.isObject() && pai.hasNonNull(subCampo)) {
             return pai.get(subCampo).asText();
         } else if (pai.isTextual()) {
-            // Caso a v1 retorne o nome diretamente na string
             return pai.asText();
         }
         return "N/I";

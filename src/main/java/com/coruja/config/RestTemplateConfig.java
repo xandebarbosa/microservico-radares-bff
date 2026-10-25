@@ -27,11 +27,22 @@ public class RestTemplateConfig {
     @LoadBalanced
     public RestTemplate loadBalancedRestTemplate(RestTemplateBuilder builder) {
         return builder
-                // 5 segundos é tempo de sobra para estabelecer conexão na rede interna do Docker
-                .setConnectTimeout(Duration.ofSeconds(5))
-                // 🚀 A MÁGICA AQUI: Aumentamos de 14s para 60s.
-                // Isso dá fôlego para o MongoDB (Rondon) processar a Análise de Comboio sem quebrar a conexão!
-                .setReadTimeout(Duration.ofSeconds(60))
+                .setConnectTimeout(Duration.ofSeconds(4))
+                .setReadTimeout(Duration.ofSeconds(30))
+                .build();
+    }
+
+    /**
+     * RestTemplate RÁPIDO (Com Load Balancing do Eureka).
+     * Exclusivo para Schedulers e verificações de últimos registros (3s connect, 5s read).
+     * Evita que um microsserviço fora do ar trave as threads do sistema.
+     */
+    @Bean("fastLoadBalancedRestTemplate")
+    @LoadBalanced
+    public RestTemplate fastLoadBalancedRestTemplate(RestTemplateBuilder builder) {
+        return builder
+                .setConnectTimeout(Duration.ofSeconds(3))
+                .setReadTimeout(Duration.ofSeconds(5))
                 .build();
     }
 
@@ -42,14 +53,13 @@ public class RestTemplateConfig {
     @Bean("directRestTemplate")
     public RestTemplate directRestTemplate(RestTemplateBuilder builder) {
         return builder
-                .setConnectTimeout(Duration.ofSeconds(10))
-                .setReadTimeout(Duration.ofSeconds(30))
+                .setConnectTimeout(Duration.ofSeconds(5))
+                .setReadTimeout(Duration.ofSeconds(15))
                 .build();
     }
 
     /**
      * Configuração global do Jackson para serialização correta de Datas ISO 8601.
-     * O @Primary garante que tanto o Spring MVC quanto os RestTemplates usem esta mesma instância.
      */
     @Bean
     @Primary
@@ -61,29 +71,21 @@ public class RestTemplateConfig {
 
     /**
      * RestTemplate exclusivo para Análises Pesadas e Inteligência Artificial.
-     * Possui um timeout longo (2 minutos) para permitir o cruzamento de milhares de placas.
      */
     @Bean("analysisRestTemplate")
     @LoadBalanced
     public RestTemplate analysisRestTemplate(RestTemplateBuilder builder) {
         return builder
-                .setConnectTimeout(Duration.ofSeconds(10))
-                // Damos 120 segundos (2 minutos) de paciência para o Quarkus cruzar os dados
-                .setReadTimeout(Duration.ofSeconds(120))
+                .setConnectTimeout(Duration.ofSeconds(5))
+                .setReadTimeout(Duration.ofSeconds(90))
                 .build();
     }
 
     @Bean("radarsRestTemplate")
     public RestTemplate radarsRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-
-        // Tempo máximo para estabelecer a conexão (2 segundos)
         factory.setConnectTimeout(2000);
-
-        // Tempo máximo esperando a resposta da concessionária (5 segundos)
-        // Se passar disso, o RestTemplate lança uma exceção e aborta.
         factory.setReadTimeout(5000);
-
         return new RestTemplate(factory);
     }
 }

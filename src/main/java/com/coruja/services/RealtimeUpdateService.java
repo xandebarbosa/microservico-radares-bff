@@ -127,13 +127,13 @@ public class RealtimeUpdateService {
 
                 case "PANTANAL", "MOTIVA":
                     if (parts.length >= 6) {
-                        radarData.setConcessionaria("Pantanal");
+                        radarData.setConcessionaria("Motiva");
                         radarData.setData(LocalDate.parse(parts[1].trim()));
                         radarData.setHora(LocalTime.parse(parts[2].trim()));
                         radarData.setPlaca(parts[3].trim());
                         radarData.setRodovia(parts[4].trim());
                         radarData.setSentido(parts[5].trim());
-                        radarData.setPraca("N/A");
+                        radarData.setPraca(parts[4].trim());
                         radarData.setKm("N/A");
                     }
                     break;
@@ -160,8 +160,13 @@ public class RealtimeUpdateService {
             if (radarData.getPlaca() != null) {
                 // Calcula o atraso em tempo real (com base na tolerância configurada)
                 radarData.calcularAtraso(limiteAtrasoMinutos);
-                // 1. Guarda o último radar no nosso mapa interno.
-                lastRadarByConcessionaria.put(radarData.getConcessionaria().trim().toUpperCase(), radarData);
+                // 1. Guarda o último radar no nosso mapa interno (chave normalizada para MOTIVA).
+                String concChave = radarData.getConcessionaria().trim().toUpperCase();
+                if ("PANTANAL".equals(concChave)) {
+                    concChave = "MOTIVA";
+                    radarData.setConcessionaria("Motiva");
+                }
+                lastRadarByConcessionaria.put(concChave, radarData);
                 // 2. Envia para o frontend via WebSocket.
                 messagingTemplate.convertAndSend("/topic/last-radar", radarData);
                 //logger.info("Último radar da {} enviado para o frontend via WebSocket.", radarData.getConcessionaria());

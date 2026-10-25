@@ -3,6 +3,7 @@ package com.coruja.config;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.rest_client.RestClientTransport;
+import lombok.Getter;
 import org.apache.http.HttpHost;
 import org.elasticsearch.client.RestClient;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,26 +11,31 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@Getter
 public class ElasticsearchConfig {
 
-    @Value("${elasticsearch.host}")
+    @Value("${elasticsearch.host:elasticsearch}")
     private String host;
 
-    @Value("${elasticsearch.port}")
+    @Value("${elasticsearch.port:9200}")
     private int port;
 
-    @Bean
-    public ElasticsearchClient elasticsearchClient() {
-        // Cria o cliente de baixo nível que se conecta ao Elasticsearch via HTTP
-        RestClient restClient = RestClient.builder(
-                new HttpHost(host, port)
-        ).build();
+    @Value("${kibana.external-url:http://192.168.0.251:5601}")
+    private String kibanaExternalUrl;
 
-        // Cria o transporte usando o cliente REST e um mapeador JSON (Jackson)
+    @Bean
+    public RestClient restClient() {
+        return RestClient.builder(new HttpHost(host, port))
+                .setRequestConfigCallback(builder -> builder
+                        .setConnectTimeout(5000)
+                        .setSocketTimeout(30000))
+                .build();
+    }
+
+    @Bean
+    public ElasticsearchClient elasticsearchClient(RestClient restClient) {
         RestClientTransport transport = new RestClientTransport(
                 restClient, new JacksonJsonpMapper());
-
-        // Retorna o cliente de API do Elasticsearch
         return new ElasticsearchClient(transport);
     }
 }
